@@ -144,7 +144,7 @@ class H264UdpStreamer(
             setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
             setInteger(MediaFormat.KEY_BIT_RATE, bitrateMbps * 1000 * 1000)
             setInteger(MediaFormat.KEY_FRAME_RATE, fps)
-            setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 1) // 1 秒刷新关键帧
+            setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 3) // 3 秒刷新关键帧，避免频繁大帧打爆 Wi-Fi
             setInteger(MediaFormat.KEY_BITRATE_MODE, MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR)
 
             // 实测最优低延迟配置（H264Probe 结论：p50 从 32ms 降到 22ms，无长尾）
@@ -248,6 +248,11 @@ class H264UdpStreamer(
                         socket.send(packet)
 
                         totalBytes += HEADER_SIZE + len
+
+                        // 对分片数较多的大关键帧（>16分片），每 16 包微让步 20 微秒，防止瞬间脉冲打爆路由器/网卡缓冲
+                        if (fragCount > 16 && (i and 15) == 15) {
+                            java.util.concurrent.locks.LockSupport.parkNanos(20_000L)
+                        }
                     }
 
                     frameSeq++

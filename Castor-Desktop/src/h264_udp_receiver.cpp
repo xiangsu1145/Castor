@@ -134,6 +134,7 @@ void H264UdpReceiver::Run() {
     int loggedCount = 0;
     sockaddr_in lastFrom{};
     int lastFromLen = 0;
+    int consecutiveDrops = 0;
     auto lastIdrReq = std::chrono::steady_clock::now();
     auto winStart = std::chrono::steady_clock::now();
 
@@ -190,13 +191,18 @@ void H264UdpReceiver::Run() {
                     }
 
                     if (!frame.empty()) {
-                        // 入 FIFO 小队列。满则丢最老：丢帧会打断参考链，故同时请求关键帧。
+                        // 入 FIFO 小队列。满则丢最老：若连续丢帧（参考链断裂）才置 needIdr_。
                         std::lock_guard<std::mutex> lk(frameMtx_);
                         if (frameQueue_.size() >= kMaxQueuedFrames) {
                             recycle_.push_back(std::move(frameQueue_.front()));
                             frameQueue_.pop_front();
                             droppedFrames_.fetch_add(1);
-                            needIdr_.store(true);
+                            if (++consecutiveDrops >= 3) {
+                                needIdr_.store(true);
+                                consecutiveDrops = 0;
+                            }
+                        } else {
+                            consecutiveDrops = 0;
                         }
                         frameQueue_.push_back(std::move(frame));
                         frameCv_.notify_one();
@@ -205,11 +211,10 @@ void H264UdpReceiver::Run() {
             }
         }
 
-        // 解码线程解不出画面 / 队列丢帧时会置 needIdr_，这里限速回发 !IDR 让手机补关键帧。
-        // 注意：限速窗口内不清除标志，等窗口一开就补发（否则丢帧触发的请求会被白白吞掉）。
+        // 解码线程解不出画面 / 连续丢帧时会置 needIdr_，限速 2000ms 回发 !IDR 请求关键帧。
         if (needIdr_.load() && lastFromLen > 0) {
             auto nowIdr = std::chrono::steady_clock::now();
-            if (std::chrono::duration_cast<std::chrono::milliseconds>(nowIdr - lastIdrReq).count() >= 500) {
+            if (std::chrono::duration_cast<std::chrono::milliseconds>(nowIdr - lastIdrReq).count() >= 2000) {
                 lastIdrReq = nowIdr;
                 needIdr_.store(false);
                 const char idrReq[4] = {'!', 'I', 'D', 'R'};

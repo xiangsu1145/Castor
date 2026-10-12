@@ -456,7 +456,7 @@ bool CreateDeviceD3D(HWND hWnd) {
     sd.BufferDesc.Width = 0;
     sd.BufferDesc.Height = 0;
     sd.BufferDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
-    sd.BufferDesc.RefreshRate.Numerator = 144;
+    sd.BufferDesc.RefreshRate.Numerator = 0; // Flip 模式自由呈现
     sd.BufferDesc.RefreshRate.Denominator = 1;
     sd.Flags = DXGI_SWAP_CHAIN_FLAG_ALLOW_MODE_SWITCH;
     sd.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
@@ -464,7 +464,7 @@ bool CreateDeviceD3D(HWND hWnd) {
     sd.SampleDesc.Count = 1;
     sd.SampleDesc.Quality = 0;
     sd.Windowed = TRUE;
-    sd.SwapEffect = DXGI_SWAP_EFFECT_DISCARD;
+    sd.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD; // 现代 Flip 模式，绕过 DWM 中间缓冲与垂直同步延迟
 
     UINT createDeviceFlags = 0;
 #ifdef _DEBUG
@@ -490,6 +490,25 @@ bool CreateDeviceD3D(HWND hWnd) {
         &featureLevel,
         &g_pd3dDeviceContext
     );
+
+    // 若驱动不支持 FLIP_DISCARD，自动回退到经典 DISCARD
+    if (FAILED(hr)) {
+        sd.SwapEffect = DXGI_SWAP_EFFECT_DISCARD;
+        sd.BufferDesc.RefreshRate.Numerator = 144;
+        hr = D3D11CreateDeviceAndSwapChain(
+            nullptr,
+            D3D_DRIVER_TYPE_HARDWARE,
+            nullptr,
+            createDeviceFlags,
+            featureLevelArray, 2,
+            D3D11_SDK_VERSION,
+            &sd,
+            &g_pSwapChain,
+            &g_pd3dDevice,
+            &featureLevel,
+            &g_pd3dDeviceContext
+        );
+    }
 
     if (FAILED(hr)) return false;
 

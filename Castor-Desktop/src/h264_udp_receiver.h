@@ -80,7 +80,7 @@ private:
     std::condition_variable frameCv_;
     std::deque<std::vector<uint8_t>> frameQueue_; // 待解码的完整压缩帧(FIFO)
     std::vector<std::vector<uint8_t>> recycle_;    // 解码完的缓冲回收池
-    static constexpr size_t kMaxQueuedFrames = 6;
+    static constexpr size_t kMaxQueuedFrames = 8;
     std::atomic<bool> needIdr_{false};
 
     std::mutex mtx_;
