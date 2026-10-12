@@ -52,12 +52,13 @@ class MainActivity : AppCompatActivity() {
     private var screenPhysicalH = 3000
     private var targetWidth = 1080
     private var targetHeight = 1920
-    private var targetFps = 60
+    private var targetFps = 120         // 默认 120 帧高刷
     private var isStreamingActive = false
     private var pendingProbe = false
-    private var useUdp = false          // 传输通道: false=NDI, true=私有 UDP H.264
+    private var useUdp = true           // 默认使用私有 UDP 超低延迟投屏
     private var pcIp: String? = null    // 自动发现的 PC IP
     private var lanDiscovery: LanDiscovery? = null
+    private var ndiNameLayout: TextInputLayout? = null
 
     // 真实屏幕尺寸：走 DisplayManager 的默认显示，跟随系统旋转（不受本 Activity 竖屏锁定影响）。
     private fun getScreenMetrics(): Pair<Int, Int> {
@@ -157,8 +158,8 @@ class MainActivity : AppCompatActivity() {
 
         // 1. MD3 顶部工具栏
         val toolbar = MaterialToolbar(this).apply {
-            title = "Castor NDI 极速投屏"
-            subtitle = "广电级低延迟 NDI 发送端 (mDNS 零配置)"
+            title = "Castor 无线投屏"
+            subtitle = "电脑端自动连接"
             setTitleTextColor(MaterialColors.getColor(this, com.google.android.material.R.attr.colorOnSurface))
             setSubtitleTextColor(MaterialColors.getColor(this, com.google.android.material.R.attr.colorOutline))
             elevation = dpToPx(2).toFloat()
@@ -218,65 +219,69 @@ class MainActivity : AppCompatActivity() {
             }
 
             inner.addView(MaterialTextView(context).apply {
-                text = "NDI 局域网广播服务"
+                text = "投屏连接与传输"
                 setTextAppearance(com.google.android.material.R.style.TextAppearance_Material3_TitleMedium)
                 setTextColor(MaterialColors.getColor(this, androidx.appcompat.R.attr.colorPrimary))
             })
 
             inner.addView(MaterialTextView(context).apply {
-                text = "● 协议标准: NewTek NDI 6\n● 零配置自动发现: 电脑端与手机在同一 Wi-Fi 下开播即可秒级识别，无需输入任何 IP 或端口。\n● 完美兼容苹果端【畅想 NDI】及电脑 Castor 接收器。"
+                text = "手机和电脑连接在同一个 Wi-Fi 网络下即可投屏。\n● UDP 模式（默认）：专用于电脑端 Castor，延迟极低，画面清晰。\n● NDI 模式：通用兼容模式，可连接第三方 NDI 接收工具。"
                 setTextAppearance(com.google.android.material.R.style.TextAppearance_Material3_BodySmall)
                 setTextColor(MaterialColors.getColor(this, com.google.android.material.R.attr.colorOutline))
                 setPadding(0, dpToPx(8), 0, dpToPx(12))
             })
 
-            // NDI 源名称设置框
+            // NDI 源名称设置框（仅在 NDI 模式下展示）
             val nameInputLayout = TextInputLayout(context).apply {
-                hint = "NDI 广播源识别名称"
+                hint = "NDI 设备名称"
                 boxBackgroundMode = TextInputLayout.BOX_BACKGROUND_OUTLINE
                 layoutParams = LinearLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT,
                     ViewGroup.LayoutParams.WRAP_CONTENT
                 ).apply { setMargins(0, 0, 0, dpToPx(16)) }
+                visibility = if (useUdp) View.GONE else View.VISIBLE
             }
+            ndiNameLayout = nameInputLayout
             ndiNameEditText = TextInputEditText(nameInputLayout.context).apply {
-                setText("Castor-Android-Phone")
+                setText("Castor-Phone")
             }
             nameInputLayout.addView(ndiNameEditText)
             inner.addView(nameInputLayout)
 
-            // 传输通道选择: NDI (兼容第三方) / 私有 UDP H.264 (低延迟高速)
+            // 传输通道选择
             val modeRow = LinearLayout(context).apply {
                 orientation = LinearLayout.HORIZONTAL
                 layoutParams = LinearLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
                 ).apply { setMargins(0, 0, 0, dpToPx(12)) }
             }
-            val btnNdiMode = MaterialButton(context, null, com.google.android.material.R.attr.materialButtonOutlinedStyle).apply {
-                text = "通道: NDI (兼容)"
+            val btnUdpMode = MaterialButton(context, null, com.google.android.material.R.attr.materialButtonOutlinedStyle).apply {
+                text = "UDP 模式 (推荐)"
                 layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { setMargins(0, 0, dpToPx(6), 0) }
                 setOnClickListener {
-                    useUdp = false
-                    statusTextView.text = "已选通道: NDI (Full/SpeedHQ)"
-                    if (!isStreamingActive) actionButton.text = "启动 NDI 屏幕广播"
+                    useUdp = true
+                    ndiNameLayout?.visibility = View.GONE
+                    statusTextView.text = if (pcIp.isNullOrEmpty()) "已切换到 UDP 模式，正在搜索电脑..." else "已选择 UDP 模式 (电脑: $pcIp)"
+                    if (!isStreamingActive) actionButton.text = "启动无线投屏"
                 }
             }
-            val btnUdpMode = MaterialButton(context, null, com.google.android.material.R.attr.materialButtonOutlinedStyle).apply {
-                text = "通道: 私有UDP (低延迟)"
+            val btnNdiMode = MaterialButton(context, null, com.google.android.material.R.attr.materialButtonOutlinedStyle).apply {
+                text = "NDI 模式 (兼容)"
                 layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
                 setOnClickListener {
-                    useUdp = true
-                    statusTextView.text = "已选通道: 私有 UDP H.264 (需电脑端已打开)"
-                    if (!isStreamingActive) actionButton.text = "启动 私有UDP 推流"
+                    useUdp = false
+                    ndiNameLayout?.visibility = View.VISIBLE
+                    statusTextView.text = "已切换到 NDI 模式"
+                    if (!isStreamingActive) actionButton.text = "启动 NDI 广播"
                 }
             }
-            modeRow.addView(btnNdiMode)
             modeRow.addView(btnUdpMode)
+            modeRow.addView(btnNdiMode)
             inner.addView(modeRow)
 
             // 主连接按钮
             actionButton = MaterialButton(context).apply {
-                text = "启动 NDI 屏幕广播"
+                text = if (useUdp) "启动无线投屏" else "启动 NDI 广播"
                 cornerRadius = dpToPx(12)
                 layoutParams = LinearLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT,
@@ -313,14 +318,14 @@ class MainActivity : AppCompatActivity() {
             }
 
             inner.addView(MaterialTextView(context).apply {
-                text = "NDI 视频规格设置"
+                text = "画面规格设置"
                 setTextAppearance(com.google.android.material.R.style.TextAppearance_Material3_TitleMedium)
                 setTextColor(MaterialColors.getColor(this, androidx.appcompat.R.attr.colorPrimary))
             })
 
             // 分辨率选择
             val resTitle = MaterialTextView(context).apply {
-                text = "画面分辨率: 1080P 超清 ($targetWidth x $targetHeight)"
+                text = "分辨率: 1080P ($targetWidth x $targetHeight)"
                 setPadding(0, dpToPx(8), 0, dpToPx(4))
             }
             inner.addView(resTitle)
@@ -333,7 +338,7 @@ class MainActivity : AppCompatActivity() {
                 )
             }
             val btn1080p = MaterialButton(context, null, com.google.android.material.R.attr.materialButtonOutlinedStyle).apply {
-                text = "1080P 超清 (25ms)"
+                text = "1080P"
                 layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1.0f).apply {
                     setMargins(0, 0, dpToPx(6), 0)
                 }
@@ -347,12 +352,12 @@ class MainActivity : AppCompatActivity() {
                         targetHeight = 1080
                         targetWidth = (((1080 * ratio).toInt() + 15) / 16) * 16
                     }
-                    resTitle.text = "画面分辨率: 1080P 超清 ($targetWidth x $targetHeight)"
+                    resTitle.text = "分辨率: 1080P ($targetWidth x $targetHeight)"
                     captureService?.updateResolution(targetWidth, targetHeight, resources.displayMetrics.densityDpi)
                 }
             }
             val btn720p = MaterialButton(context, null, com.google.android.material.R.attr.materialButtonOutlinedStyle).apply {
-                text = "720P 极速 (15ms)"
+                text = "720P"
                 layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1.0f).apply {
                     setMargins(0, 0, dpToPx(6), 0)
                 }
@@ -366,12 +371,12 @@ class MainActivity : AppCompatActivity() {
                         targetHeight = 720
                         targetWidth = (((720 * ratio).toInt() + 15) / 16) * 16
                     }
-                    resTitle.text = "画面分辨率: 720P 极速 ($targetWidth x $targetHeight)"
+                    resTitle.text = "分辨率: 720P ($targetWidth x $targetHeight)"
                     captureService?.updateResolution(targetWidth, targetHeight, resources.displayMetrics.densityDpi)
                 }
             }
             val btn540p = MaterialButton(context, null, com.google.android.material.R.attr.materialButtonOutlinedStyle).apply {
-                text = "540P 极速"
+                text = "540P"
                 layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1.0f).apply {
                     setMargins(0, 0, dpToPx(6), 0)
                 }
@@ -385,18 +390,18 @@ class MainActivity : AppCompatActivity() {
                         targetHeight = 540
                         targetWidth = (((540 * ratio).toInt() + 15) / 16) * 16
                     }
-                    resTitle.text = "画面分辨率: 540P 极速 ($targetWidth x $targetHeight)"
+                    resTitle.text = "分辨率: 540P ($targetWidth x $targetHeight)"
                     captureService?.updateResolution(targetWidth, targetHeight, resources.displayMetrics.densityDpi)
                 }
             }
             val btnNative = MaterialButton(context, null, com.google.android.material.R.attr.materialButtonOutlinedStyle).apply {
-                text = "1:1 原画"
+                text = "原生原画"
                 layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1.0f)
                 setOnClickListener {
                     val (w, h) = getScreenMetrics()
                     targetWidth = ((w / 16) * 16)
                     targetHeight = ((h / 16) * 16)
-                    resTitle.text = "画面分辨率: 1:1 原画 ($targetWidth x $targetHeight)"
+                    resTitle.text = "分辨率: 原生原画 ($targetWidth x $targetHeight)"
                     captureService?.updateResolution(targetWidth, targetHeight, resources.displayMetrics.densityDpi)
                 }
             }
@@ -420,11 +425,11 @@ class MainActivity : AppCompatActivity() {
                     ViewGroup.LayoutParams.WRAP_CONTENT
                 )
             }
-            for (fps in listOf(30, 60, 120)) {
+            for (fps in listOf(60, 90, 120, 144)) {
                 val btnFps = MaterialButton(context, null, com.google.android.material.R.attr.materialButtonOutlinedStyle).apply {
-                    text = "${fps} FPS"
+                    text = "${fps} 帧"
                     layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1.0f).apply {
-                        if (fps != 120) setMargins(0, 0, dpToPx(6), 0)
+                        if (fps != 144) setMargins(0, 0, dpToPx(6), 0)
                     }
                     setOnClickListener {
                         targetFps = fps
@@ -435,13 +440,6 @@ class MainActivity : AppCompatActivity() {
                 fpsLayout.addView(btnFps)
             }
             inner.addView(fpsLayout)
-
-            inner.addView(MaterialTextView(context).apply {
-                text = "⚡ 底层集成官方 libndi.so 动态库 + NEON 指令集硬件加速，延迟稳定 20~30ms。"
-                setTextAppearance(com.google.android.material.R.style.TextAppearance_Material3_BodySmall)
-                setTextColor(MaterialColors.getColor(this, androidx.appcompat.R.attr.colorPrimary))
-                setPadding(0, dpToPx(12), 0, 0)
-            })
 
             addView(inner)
         }
@@ -464,33 +462,24 @@ class MainActivity : AppCompatActivity() {
             }
 
             inner.addView(MaterialTextView(context).apply {
-                text = "NDI 实时状态监控"
+                text = "投屏状态"
                 setTextAppearance(com.google.android.material.R.style.TextAppearance_Material3_TitleMedium)
                 setTextColor(MaterialColors.getColor(this, androidx.appcompat.R.attr.colorPrimary))
             })
 
             statusTextView = MaterialTextView(context).apply {
-                text = "状态: 未广播 (就绪)"
+                text = "状态: 未连接"
                 setTextAppearance(com.google.android.material.R.style.TextAppearance_Material3_BodyMedium)
                 setPadding(0, dpToPx(6), 0, dpToPx(4))
             }
             inner.addView(statusTextView)
 
             liveStatsText = MaterialTextView(context).apply {
-                text = "实时帧率: -- FPS | 广播带宽: -- Mbps"
+                text = "实时帧率: -- FPS | 带宽: -- Mbps"
                 setTextAppearance(com.google.android.material.R.style.TextAppearance_Material3_BodyMedium)
                 setPadding(0, 0, 0, dpToPx(6))
             }
             inner.addView(liveStatsText)
-
-            inner.addView(MaterialButton(context, null, com.google.android.material.R.attr.materialButtonOutlinedStyle).apply {
-                text = "① 实测 H.264 编码耗时 (隔离编码器≈25s)"
-                cornerRadius = dpToPx(12)
-                layoutParams = LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
-                ).apply { setMargins(0, dpToPx(10), 0, 0) }
-                setOnClickListener { requestH264Probe() }
-            })
 
             addView(inner)
         }
@@ -567,17 +556,7 @@ class MainActivity : AppCompatActivity() {
         }
         pendingProbe = false
         actionButton.isEnabled = false
-        actionButton.text = "正在启动 NDI..."
-        val projectionManager = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
-        projectionLauncher.launch(projectionManager.createScreenCaptureIntent())
-    }
-
-    /** 纯实测：跑一遍硬件 H.264 编码管线，量真实帧率/编码延迟/码率（不发网络）。结果见 logcat 标签 H264Probe。 */
-    private fun requestH264Probe() {
-        pendingProbe = true
-        isStreamingActive = false
-        actionButton.isEnabled = false
-        actionButton.text = "正在启动编码实测..."
+        actionButton.text = if (useUdp) "正在连接..." else "正在启动..."
         val projectionManager = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
         projectionLauncher.launch(projectionManager.createScreenCaptureIntent())
     }
@@ -592,18 +571,18 @@ class MainActivity : AppCompatActivity() {
             isBound = false
         }
         updateUiState(false)
-        statusTextView.text = "状态: 未广播"
-        liveStatsText.text = "实时帧率: -- FPS | 广播带宽: -- Mbps"
+        statusTextView.text = "状态: 未连接"
+        liveStatsText.text = "实时帧率: -- FPS | 带宽: -- Mbps"
     }
 
     private fun updateUiState(running: Boolean) {
         isStreamingActive = running
         actionButton.isEnabled = true
         if (running) {
-            actionButton.text = "停止 NDI 广播"
+            actionButton.text = if (useUdp) "停止无线投屏" else "停止 NDI 广播"
             actionButton.backgroundTintList = ColorStateList.valueOf(Color.parseColor("#E53935"))
         } else {
-            actionButton.text = "启动 NDI 屏幕广播"
+            actionButton.text = if (useUdp) "启动无线投屏" else "启动 NDI 广播"
             val primaryColor = MaterialColors.getColor(actionButton, androidx.appcompat.R.attr.colorPrimary)
             actionButton.backgroundTintList = ColorStateList.valueOf(primaryColor)
         }

@@ -67,9 +67,10 @@ class H264UdpStreamer(
         if (isStreaming.getAndSet(true)) return
 
         workerThread = Thread({
+            android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_URGENT_DISPLAY)
             try {
-                Log.i(TAG, "正在启动 UDP H.264 硬件推流 -> $targetIp:$targetPort (规格: ${width}x${height} @ ${fps}FPS, 码率: ${bitrateMbps}Mbps)")
-                onStatusChanged?.invoke(true, "正在连接电脑 $targetIp:$targetPort (UDP H.264)...")
+                Log.i(TAG, "正在启动投屏硬件推流 -> $targetIp:$targetPort (规格: ${width}x${height} @ ${fps}FPS, 码率: ${bitrateMbps}Mbps)")
+                onStatusChanged?.invoke(true, "正在连接电脑 $targetIp:$targetPort...")
 
                 pcAddress = InetAddress.getByName(targetIp)
                 udpSocket = DatagramSocket().apply {
@@ -154,17 +155,33 @@ class H264UdpStreamer(
             setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 3) // 3 秒刷新关键帧，避免频繁大帧打爆 Wi-Fi
             setInteger(MediaFormat.KEY_BITRATE_MODE, MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR)
 
-            // 实测最优低延迟配置（H264Probe 结论：p50 从 32ms 降到 22ms，无长尾）
-            try { setInteger(MediaFormat.KEY_LATENCY, 0) } catch (_: Exception) {}
-            try { setInteger(MediaFormat.KEY_PRIORITY, 0) } catch (_: Exception) {}
-            try { setInteger(MediaFormat.KEY_OPERATING_RATE, fps) } catch (_: Exception) {}
-            try { setInteger("vendor.qti-ext-enc-low-latency.enable", 1) } catch (_: Exception) {}
-            // 禁止 B 帧，确保单向参考无乱序，消除解码重排与宏块撕裂
-            try { setInteger(MediaFormat.KEY_MAX_B_FRAMES, 0) } catch (_: Exception) {}
-            // 注意：不要设 KEY_REPEAT_PREVIOUS_FRAME_AFTER —— 实测它会引入长尾延迟
+            // 1. Android 标准低延迟与帧率同步
+            setIntegerSafe(MediaFormat.KEY_PRIORITY, 0)
+            setIntegerSafe(MediaFormat.KEY_LATENCY, 0)
+            setIntegerSafe(MediaFormat.KEY_OPERATING_RATE, fps)
+            setIntegerSafe(MediaFormat.KEY_CAPTURE_RATE, fps)
+
+            // 2. 彻底禁止 B 帧（单向参考消除重排延迟与宏块撕裂）
+            setIntegerSafe("max-bframes", 0)
+            setIntegerSafe("max-b-frames", 0)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                setIntegerSafe(MediaFormat.KEY_MAX_B_FRAMES, 0)
+            }
+
+            // 3. 高通骁龙私有极低延迟扩展 (QTI Low-Latency Extensions)
+            setIntegerSafe("vendor.qti-ext-enc-low-latency.enable", 1)
+            setIntegerSafe("vendor.qti-ext-enc-venc-low-latency.enable", 1)
+            setIntegerSafe("vendor.qti-ext-enc-preprocess-rotate.enable", 0)
+
+            // 4. 联发科/通用厂商私有低延迟 Key 与 IDR 头前置
+            setIntegerSafe("low-latency", 1)
+            setIntegerSafe("latency", 0)
+            setIntegerSafe("priority", 0)
+            setIntegerSafe("max-bitrate", bitrateMbps * 1000 * 1000)
+            setIntegerSafe("prepend-sps-pps-to-idr-frames", 1)
         }
 
-        Log.i(TAG, "正在创建 MediaCodec 编码器并配置格式: ${alignedW}x${alignedH} @ ${bitrateMbps}Mbps CBR")
+        Log.i(TAG, "正在创建 MediaCodec 编码器并配置格式: ${alignedW}x${alignedH} @ ${bitrateMbps}Mbps CBR, 目标帧率: ${fps}FPS")
         mediaCodec = MediaCodec.createEncoderByType(MIME_TYPE).apply {
             configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
         }
@@ -180,7 +197,13 @@ class H264UdpStreamer(
         )
 
         Log.i(TAG, "MediaCodec 硬件编码器与 VirtualDisplay 已就绪: ${alignedW}x${alignedH} @ ${fps}FPS")
-        onStatusChanged?.invoke(true, "硬件 H.264 推流中: ${alignedW}x${alignedH} @ ${fps}FPS")
+        onStatusChanged?.invoke(true, "投屏推流中: ${alignedW}x${alignedH} @ ${fps}FPS")
+    }
+
+    private fun MediaFormat.setIntegerSafe(key: String, value: Int) {
+        try {
+            setInteger(key, value)
+        } catch (_: Exception) {}
     }
 
     private fun drainEncoder() {
