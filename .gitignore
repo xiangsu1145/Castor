@@ -1,0 +1,52 @@
+# ==========================================
+# Operating System & IDE
+# ==========================================
+.DS_Store
+Thumbs.db
+*.swp
+*.bak
+.vs/
+.vscode/
+*.user
+*.suo
+
+# ==========================================
+# C++ / CMake / Ninja (Desktop)
+# ==========================================
+Castor-Desktop/build/
+CMakeLists.txt.user
+CMakeUserPresets.json
+*.obj
+*.pdb
+*.ilk
+*.exp
+*.log
+*.ninja*
+
+# ==========================================
+# Android / Gradle (Mobile)
+# ==========================================
+.gradle/
+.idea/
+.kotlin/
+*.iml
+local.properties
+captures/
+.externalNativeBuild/
+.cxx/
+build/
+*/build/
+*/.cxx/
+*/.gradle/
+*/.idea/
+*/.kotlin/
+*/local.properties
+*.apk
+*.aab
+
+# ==========================================
+# NDI SDK Installers & Archives (Large Binaries)
+# ==========================================
+Install_NDI_SDK_v6_Android.tar.gz
+NDI 6 SDK.exe
+NDI_SDK_Android/
