@@ -182,12 +182,14 @@ void H264UdpReceiver::Run() {
                     const int fragCount = p.fragCount;
                     const bool isKey = (h.flags & 0x01) != 0;
 
-                    // 检查是否发生跨帧丢失（seq 跳变）：丢失 P 帧会破坏运动矢量，触发 IDR 迅速自愈
-                    if (lastCompletedSeq != 0 && h.frameSeq > lastCompletedSeq + 1) {
+                    // 仅当跳帧超过合理乱序范围（> 8 帧）才认为是发生了网络真正丢帧
+                    if (lastCompletedSeq != 0 && h.frameSeq > lastCompletedSeq + 8) {
                         brokenRefChain_.store(true);
                         needIdr_.store(true);
                     }
-                    lastCompletedSeq = h.frameSeq;
+                    if (h.frameSeq > lastCompletedSeq) {
+                        lastCompletedSeq = h.frameSeq;
+                    }
 
                     // 从回收池取一块缓冲复用，避免逐帧 malloc
                     PacketFrame pkt;
@@ -216,7 +218,6 @@ void H264UdpReceiver::Run() {
                             recycle_.push_back(std::move(frameQueue_.front().data));
                             frameQueue_.pop_front();
                             droppedFrames_.fetch_add(1);
-                            brokenRefChain_.store(true);
                             needIdr_.store(true);
                         }
                         frameQueue_.push_back(std::move(pkt));
@@ -226,10 +227,10 @@ void H264UdpReceiver::Run() {
             }
         }
 
-        // 解码线程解不出画面 / 检测到丢包断链时置 needIdr_，限速 200ms 回发 !IDR 请求关键帧自愈。
+        // 解码线程解不出画面 / 检测到丢包断链时置 needIdr_，限速 500ms 回发 !IDR 请求关键帧自愈。
         if (needIdr_.load() && lastFromLen > 0) {
             auto nowIdr = std::chrono::steady_clock::now();
-            if (std::chrono::duration_cast<std::chrono::milliseconds>(nowIdr - lastIdrReq).count() >= 200) {
+            if (std::chrono::duration_cast<std::chrono::milliseconds>(nowIdr - lastIdrReq).count() >= 500) {
                 lastIdrReq = nowIdr;
                 needIdr_.store(false);
                 const char idrReq[4] = {'!', 'I', 'D', 'R'};

@@ -84,7 +84,7 @@ private:
     std::condition_variable frameCv_;
     std::deque<PacketFrame> frameQueue_; // 待解码的完整压缩帧(FIFO)
     std::vector<std::vector<uint8_t>> recycle_; // 解码完的缓冲回收池
-    static constexpr size_t kMaxQueuedFrames = 8;
+    static constexpr size_t kMaxQueuedFrames = 16;
     std::atomic<bool> needIdr_{false};
     std::atomic<bool> brokenRefChain_{false}; // 一旦丢包置 true，仅显示上一帧清晰画面，直到收到 IDR 帧瞬时恢复
 

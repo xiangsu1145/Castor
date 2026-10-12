@@ -93,7 +93,14 @@ class H264UdpStreamer(
         }
     }
 
+    private var lastIdrRequestTime = 0L
+
     fun requestKeyFrame() {
+        val now = SystemClock.elapsedRealtime()
+        if (now - lastIdrRequestTime < 500) {
+            return // 500ms 限速，避免网络短暂波动期间重复狂刷 200KB 的超大 IDR 帧
+        }
+        lastIdrRequestTime = now
         try {
             val params = Bundle().apply {
                 putInt(MediaCodec.PARAMETER_KEY_REQUEST_SYNC_FRAME, 0)
