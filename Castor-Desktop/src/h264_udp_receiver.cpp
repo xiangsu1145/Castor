@@ -134,7 +134,6 @@ void H264UdpReceiver::Run() {
     int loggedCount = 0;
     sockaddr_in lastFrom{};
     int lastFromLen = 0;
-    int consecutiveDrops = 0;
     uint32_t lastCompletedSeq = 0;
     auto lastIdrReq = std::chrono::steady_clock::now();
     auto winStart = std::chrono::steady_clock::now();
@@ -158,74 +157,79 @@ void H264UdpReceiver::Run() {
                     p.fragCount = h.fragCount;
                     p.frags.assign(h.fragCount, {});
                     p.have.assign(h.fragCount, false);
-                    if (pending.size() > 4) {
-                        uint32_t oldestKey = 0; bool found = false;
-                        for (auto& kv : pending) { if (!found || kv.first < oldestKey) { oldestKey = kv.first; found = true; } }
-                        if (found && oldestKey != h.frameSeq) {
-                            pending.erase(oldestKey);
-                            droppedFrames_.fetch_add(1);
-                            needIdr_.store(true); // 丢弃未收齐分片的残缺帧，立即请求 IDR 修复宏块错位模糊
-                        }
-                    }
                 }
                 if (!p.have[h.fragIndex]) {
                     p.frags[h.fragIndex].assign(recvBuf.begin() + HDR_SIZE, recvBuf.begin() + HDR_SIZE + h.len);
                     p.have[h.fragIndex] = true;
                     p.received++;
                 }
+
+                // 容忍轻微 Wi-Fi 乱序（窗口扩大至 64 帧），仅清理严重过期的未收齐残包
+                if (pending.size() > 64) {
+                    uint32_t oldestKey = 0; bool found = false;
+                    for (auto& kv : pending) {
+                        if (!found || kv.first < oldestKey) { oldestKey = kv.first; found = true; }
+                    }
+                    if (found && oldestKey + 32 < h.frameSeq) {
+                        pending.erase(oldestKey);
+                        droppedFrames_.fetch_add(1);
+                        brokenRefChain_.store(true);
+                        needIdr_.store(true);
+                    }
+                }
+
                 if (p.received == p.fragCount) {
                     const int fragCount = p.fragCount;
+                    const bool isKey = (h.flags & 0x01) != 0;
 
                     // 检查是否发生跨帧丢失（seq 跳变）：丢失 P 帧会破坏运动矢量，触发 IDR 迅速自愈
                     if (lastCompletedSeq != 0 && h.frameSeq > lastCompletedSeq + 1) {
+                        brokenRefChain_.store(true);
                         needIdr_.store(true);
                     }
                     lastCompletedSeq = h.frameSeq;
 
                     // 从回收池取一块缓冲复用，避免逐帧 malloc
-                    std::vector<uint8_t> frame;
+                    PacketFrame pkt;
+                    pkt.isKeyFrame = isKey;
+                    pkt.seq = h.frameSeq;
                     {
                         std::lock_guard<std::mutex> lk(frameMtx_);
-                        if (!recycle_.empty()) { frame = std::move(recycle_.back()); recycle_.pop_back(); }
+                        if (!recycle_.empty()) { pkt.data = std::move(recycle_.back()); recycle_.pop_back(); }
                     }
-                    frame.clear();
-                    for (auto& fr : p.frags) frame.insert(frame.end(), fr.begin(), fr.end());
+                    pkt.data.clear();
+                    for (auto& fr : p.frags) pkt.data.insert(pkt.data.end(), fr.begin(), fr.end());
                     pending.erase(h.frameSeq);
                     completedThisSec++;
 
-                    if (loggedCount < 4 && !frame.empty()) {
+                    if (loggedCount < 4 && !pkt.data.empty()) {
                         char hex[64] = {0};
-                        const int hn = frame.size() < 12 ? static_cast<int>(frame.size()) : 12;
-                        for (int i = 0; i < hn; ++i) std::snprintf(hex + i * 3, 4, "%02X ", frame[i]);
-                        ULog("frame seq=%u size=%zu frags=%d head=[%s]", h.frameSeq, frame.size(), fragCount, hex);
+                        const int hn = pkt.data.size() < 12 ? static_cast<int>(pkt.data.size()) : 12;
+                        for (int i = 0; i < hn; ++i) std::snprintf(hex + i * 3, 4, "%02X ", pkt.data[i]);
+                        ULog("frame seq=%u size=%zu frags=%d key=%d head=[%s]", h.frameSeq, pkt.data.size(), fragCount, isKey ? 1 : 0, hex);
                         loggedCount++;
                     }
 
-                    if (!frame.empty()) {
-                        // 入 FIFO 小队列。满则丢最老：若连续丢帧（参考链断裂）才置 needIdr_。
+                    if (!pkt.data.empty()) {
                         std::lock_guard<std::mutex> lk(frameMtx_);
                         if (frameQueue_.size() >= kMaxQueuedFrames) {
-                            recycle_.push_back(std::move(frameQueue_.front()));
+                            recycle_.push_back(std::move(frameQueue_.front().data));
                             frameQueue_.pop_front();
                             droppedFrames_.fetch_add(1);
-                            if (++consecutiveDrops >= 3) {
-                                needIdr_.store(true);
-                                consecutiveDrops = 0;
-                            }
-                        } else {
-                            consecutiveDrops = 0;
+                            brokenRefChain_.store(true);
+                            needIdr_.store(true);
                         }
-                        frameQueue_.push_back(std::move(frame));
+                        frameQueue_.push_back(std::move(pkt));
                         frameCv_.notify_one();
                     }
                 }
             }
         }
 
-        // 解码线程解不出画面 / 检测到丢帧时置 needIdr_，限速 600ms 回发 !IDR 请求关键帧自愈。
+        // 解码线程解不出画面 / 检测到丢包断链时置 needIdr_，限速 200ms 回发 !IDR 请求关键帧自愈。
         if (needIdr_.load() && lastFromLen > 0) {
             auto nowIdr = std::chrono::steady_clock::now();
-            if (std::chrono::duration_cast<std::chrono::milliseconds>(nowIdr - lastIdrReq).count() >= 600) {
+            if (std::chrono::duration_cast<std::chrono::milliseconds>(nowIdr - lastIdrReq).count() >= 200) {
                 lastIdrReq = nowIdr;
                 needIdr_.store(false);
                 const char idrReq[4] = {'!', 'I', 'D', 'R'};
@@ -259,11 +263,12 @@ void H264UdpReceiver::Run() {
 
 void H264UdpReceiver::DecodeLoop() {
     SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
-    std::vector<uint8_t> local;
+    PacketFrame local;
     std::vector<uint8_t> bgra;
     int dw = 0, dh = 0;
     int framesThisSec = 0;
     int failsThisSec = 0;
+    int skippedPThisSec = 0;
     auto winStart = std::chrono::steady_clock::now();
     uint64_t outSeq = 0;
     float fps = 0.0f;
@@ -276,39 +281,59 @@ void H264UdpReceiver::DecodeLoop() {
             std::unique_lock<std::mutex> lk(frameMtx_);
             frameCv_.wait(lk, [this] { return !running_.load() || !frameQueue_.empty(); });
             if (!running_.load()) break;
-            local.swap(frameQueue_.front());
-            recycle_.push_back(std::move(frameQueue_.front())); // 回收上一帧的缓冲
+            local = std::move(frameQueue_.front());
             frameQueue_.pop_front();
         }
-        if (local.empty()) continue;
+        if (local.data.empty()) continue;
+
+        // 若当前处于丢包断链状态，且当前帧为 IDR 关键帧，则参考链瞬间完全自愈
+        if (local.isKeyFrame) {
+            if (brokenRefChain_.load()) {
+                brokenRefChain_.store(false);
+                ULog("[H264UDP] 收到 IDR 关键帧 (seq=%u)，参考链已无缝恢复！", local.seq);
+            }
+        }
 
         auto t0 = std::chrono::steady_clock::now();
         int stride = 0;
-        // 只解出原始 NV12；NV12->BGRA 的 GPU 转换由渲染线程做（D3D immediate context 单线程）
-        const bool ok = decoder_.DecodeFrame(local.data(), local.size(), bgra, dw, dh, true, &stride);
+        // 关键：即使 brokenRefChain_ 为 true，也必须送进解码器解码以推进内部状态/避免状态滞后，
+        // 但若是丢包期间损坏的非关键帧(P帧)，绝对不送显发布，避免屏幕产生任何宏块马赛克与撕裂。
+        const bool ok = decoder_.DecodeFrame(local.data.data(), local.data.size(), bgra, dw, dh, true, &stride);
         auto t1 = std::chrono::steady_clock::now();
         const double decodeMs = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count() / 1000.0;
 
+        // 回收缓冲供后续帧复用
+        {
+            std::lock_guard<std::mutex> lk(frameMtx_);
+            recycle_.push_back(std::move(local.data));
+        }
+
         if (ok && dw > 0 && dh > 0 && !bgra.empty()) {
-            auto buf = acquireBgraBuffer(bgra.size());
-            if (buf) {
-                buf->swap(bgra);
-                std::lock_guard<std::mutex> lk(mtx_);
-                latest_.rgba = buf;
-                latest_.nv12Frame = true;
-                latest_.nv12Stride = stride;
-                latest_.width = dw;
-                latest_.height = dh;
-                latest_.stride = dw * 4;
-                latest_.seq = ++outSeq;
-                latest_.fps = fps;
-                latest_.captureNs = std::chrono::steady_clock::now().time_since_epoch().count();
-                latest_.clientIp = "UDP-H264";
-                totalFrames_.fetch_add(1);
+            if (brokenRefChain_.load() && !local.isKeyFrame) {
+                // 处于断链期间的残缺 P 帧，直接静默压制不送显，屏幕自然保持上一帧完好图像
+                skippedPThisSec++;
+            } else {
+                auto buf = acquireBgraBuffer(bgra.size());
+                if (buf) {
+                    buf->swap(bgra);
+                    std::lock_guard<std::mutex> lk(mtx_);
+                    latest_.rgba = buf;
+                    latest_.nv12Frame = true;
+                    latest_.nv12Stride = stride;
+                    latest_.width = dw;
+                    latest_.height = dh;
+                    latest_.stride = dw * 4;
+                    latest_.seq = ++outSeq;
+                    latest_.fps = fps;
+                    latest_.captureNs = std::chrono::steady_clock::now().time_since_epoch().count();
+                    latest_.clientIp = "UDP-H264";
+                    totalFrames_.fetch_add(1);
+                }
+                framesThisSec++;
             }
-            framesThisSec++;
         } else {
             failsThisSec++;
+            brokenRefChain_.store(true);
             needIdr_.store(true);
         }
 
@@ -322,10 +347,11 @@ void H264UdpReceiver::DecodeLoop() {
         if (elapsedMs >= 1000) {
             fps = framesThisSec * 1000.0f / static_cast<float>(elapsedMs);
             const int n = timingCount > 0 ? timingCount : 1;
-            ULog("decode: %.1f fps | 解=%.1fms 等待=%.1fms 发布=%.1fms | fails=%d",
-                 fps, decodeSumMs / n, waitSumMs / n, pubSumMs / n, failsThisSec);
+            ULog("decode: %.1f fps | 解=%.1fms 等待=%.1fms 发布=%.1fms | fails=%d skippedP=%d",
+                 fps, decodeSumMs / n, waitSumMs / n, pubSumMs / n, failsThisSec, skippedPThisSec);
             framesThisSec = 0;
             failsThisSec = 0;
+            skippedPThisSec = 0;
             waitSumMs = decodeSumMs = pubSumMs = 0;
             timingCount = 0;
             winStart = now;

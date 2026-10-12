@@ -72,16 +72,21 @@ private:
     std::thread thread_;
     uint16_t port_ = 27190;
 
+    struct PacketFrame {
+        std::vector<uint8_t> data;
+        bool isKeyFrame = false;
+        uint32_t seq = 0;
+    };
+
     // 收包线程 -> 解码线程 的小队列。
-    // WiFi 的 A-MPDU 聚合会把帧"成串"送来，"只留最新"会丢掉一串中间帧；
-    // 而丢掉一个 P 帧会打断 H.264 参考链 -> 后续帧带错参考 -> 运动拖影。
-    // 故用 FIFO 小队列(深 3) + 缓冲回收池(零逐帧 malloc)：堆积时丢最老并请求关键帧。
+    // 使用 FIFO 小队列 + 关键帧/丢包参考帧断链保护机制 (Broken Reference Chain Protection)
     std::mutex frameMtx_;
     std::condition_variable frameCv_;
-    std::deque<std::vector<uint8_t>> frameQueue_; // 待解码的完整压缩帧(FIFO)
-    std::vector<std::vector<uint8_t>> recycle_;    // 解码完的缓冲回收池
+    std::deque<PacketFrame> frameQueue_; // 待解码的完整压缩帧(FIFO)
+    std::vector<std::vector<uint8_t>> recycle_; // 解码完的缓冲回收池
     static constexpr size_t kMaxQueuedFrames = 8;
     std::atomic<bool> needIdr_{false};
+    std::atomic<bool> brokenRefChain_{false}; // 一旦丢包置 true，仅显示上一帧清晰画面，直到收到 IDR 帧瞬时恢复
 
     std::mutex mtx_;
     FrameBuffer latest_;

@@ -152,10 +152,8 @@ class H264UdpStreamer(
             try { setInteger(MediaFormat.KEY_PRIORITY, 0) } catch (_: Exception) {}
             try { setInteger(MediaFormat.KEY_OPERATING_RATE, fps) } catch (_: Exception) {}
             try { setInteger("vendor.qti-ext-enc-low-latency.enable", 1) } catch (_: Exception) {}
-            // 启用宏块级周期内自愈刷新 (Intra-Refresh)：每 30 帧 (250ms) 完成全屏宏块扫描自愈，彻底杜绝丢包时画面一块块马赛克模糊
-            try { setInteger(MediaFormat.KEY_INTRA_REFRESH_PERIOD, 30) } catch (_: Exception) {}
-            try { setInteger(MediaFormat.KEY_PROFILE, MediaCodecInfo.CodecProfileLevel.AVCProfileBaseline) } catch (_: Exception) {}
-            try { setInteger(MediaFormat.KEY_LEVEL, MediaCodecInfo.CodecProfileLevel.AVCLevel52) } catch (_: Exception) {}
+            // 禁止 B 帧，确保单向参考无乱序，消除解码重排与宏块撕裂
+            try { setInteger(MediaFormat.KEY_MAX_B_FRAMES, 0) } catch (_: Exception) {}
             // 注意：不要设 KEY_REPEAT_PREVIOUS_FRAME_AFTER —— 实测它会引入长尾延迟
         }
 
