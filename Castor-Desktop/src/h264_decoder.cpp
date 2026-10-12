@@ -2,6 +2,8 @@
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#include <d3d11.h>
+#include <dxgi.h>
 #include <mfapi.h>
 #include <mfidl.h>
 #include <mftransform.h>
@@ -40,6 +42,8 @@ static const GUID IID_ICodecAPI_Local =
     { 0x901db4c7, 0x31ce, 0x41a2, { 0x85, 0xdc, 0x8f, 0xa0, 0xbf, 0x41, 0xb8, 0xda } };
 static const GUID CODECAPI_AVLowLatencyMode_Local = 
     { 0x9c27891a, 0xed7a, 0x40e1, { 0x88, 0xe8, 0xb2, 0x27, 0x27, 0xa0, 0x24, 0xee } };
+static const GUID MF_SA_D3D11_AWARE_Local = 
+    { 0x206b4fc8, 0xfcf9, 0x4c51, { 0xaf, 0xe3, 0x97, 0x64, 0x36, 0x9e, 0x33, 0xa0 } };
 
 // NV12 -> BGRA，SSE2 手写向量化（每次 8 像素）。YUV BT.601 limited range。
 static inline void ConvertNV12ToBGRA_Fast(const uint8_t* nv12, int width, int height, int strideY, uint8_t* bgra) {
@@ -162,7 +166,12 @@ struct H264Decoder::Impl {
         return false;
     }
 
-    bool Init() {
+    ID3D11Device* d3dDevice = nullptr;
+    IMFDXGIDeviceManager* dxgiManager = nullptr;
+    UINT resetToken = 0;
+    bool d3d11vaEnabled = false;
+
+    bool Init(ID3D11Device* dev = nullptr) {
         if (initialized) return true;
         CoInitializeEx(nullptr, COINIT_MULTITHREADED);
         MFStartup(MF_VERSION);
@@ -170,6 +179,35 @@ struct H264Decoder::Impl {
         HRESULT hr = CoCreateInstance(CLSID_CMSH264DecoderMFT_Local, nullptr, CLSCTX_INPROC_SERVER,
                                       IID_IMFTransform, reinterpret_cast<void**>(&decoder));
         if (FAILED(hr) || !decoder) return false;
+
+        // 若传入了 D3D11 设备，开启 D3D11VA 显卡硬件解码加速
+        if (dev) {
+            d3dDevice = dev;
+            ID3D10Multithread* pMultithread = nullptr;
+            if (SUCCEEDED(dev->QueryInterface(IID_PPV_ARGS(&pMultithread)))) {
+                pMultithread->SetMultithreadProtected(TRUE);
+                pMultithread->Release();
+            }
+
+            HRESULT hrDx = MFCreateDXGIDeviceManager(&resetToken, &dxgiManager);
+            if (SUCCEEDED(hrDx) && dxgiManager) {
+                hrDx = dxgiManager->ResetDevice(d3dDevice, resetToken);
+                if (SUCCEEDED(hrDx)) {
+                    IMFAttributes* attrs = nullptr;
+                    if (SUCCEEDED(decoder->GetAttributes(&attrs)) && attrs) {
+                        attrs->SetUINT32(MF_SA_D3D11_AWARE_Local, 1);
+                        attrs->Release();
+                    }
+                    HRESULT hrMsg = decoder->ProcessMessage(MFT_MESSAGE_SET_D3D_MANAGER, reinterpret_cast<ULONG_PTR>(dxgiManager));
+                    if (SUCCEEDED(hrMsg)) {
+                        d3d11vaEnabled = true;
+                        HLog("[H264Decoder] 成功激活 D3D11VA 显卡硬件解码加速 (NVDEC/QSV)!");
+                    } else {
+                        HLog("[H264Decoder] MFT_MESSAGE_SET_D3D_MANAGER 失败 (hr=0x%08X)，保持 CPU 软解", hrMsg);
+                    }
+                }
+            }
+        }
 
         // 启用微软原生低延迟模式 (0 缓存与 0 前瞻队列)
         ICodecAPI* codecApi = nullptr;
@@ -236,6 +274,10 @@ struct H264Decoder::Impl {
         if (decoder) {
             decoder->Release();
             decoder = nullptr;
+        }
+        if (dxgiManager) {
+            dxgiManager->Release();
+            dxgiManager = nullptr;
         }
         if (initialized) {
             MFShutdown();
@@ -354,69 +396,110 @@ struct H264Decoder::Impl {
             outMediaBuffer->SetCurrentLength(0);
         }
 
+        MFT_OUTPUT_STREAM_INFO streamInfo{};
+        decoder->GetOutputStreamInfo(0, &streamInfo);
+        const bool providesSamples = (streamInfo.dwFlags & MFT_OUTPUT_STREAM_PROVIDES_SAMPLES) != 0;
+
         MFT_OUTPUT_DATA_BUFFER outputDataBuffer{};
         outputDataBuffer.dwStreamID = 0;
-        outputDataBuffer.pSample = outSample;
+        outputDataBuffer.pSample = providesSamples ? nullptr : outSample;
         outputDataBuffer.dwStatus = 0;
         DWORD status = 0;
 
         hr = decoder->ProcessOutput(0, 1, &outputDataBuffer, &status);
         if (hr == MF_E_TRANSFORM_STREAM_CHANGE) {
             ConfigureOutputMediaType();
-            outputDataBuffer.pSample = outSample;
+            decoder->GetOutputStreamInfo(0, &streamInfo);
+            const bool newProvidesSamples = (streamInfo.dwFlags & MFT_OUTPUT_STREAM_PROVIDES_SAMPLES) != 0;
+            outputDataBuffer.pSample = newProvidesSamples ? nullptr : outSample;
             outputDataBuffer.dwStatus = 0;
             hr = decoder->ProcessOutput(0, 1, &outputDataBuffer, &status);
         }
-        if (doLog) HLog("decode#%d out: hrOut=0x%08X status=0x%08X w=%d h=%d", logId,
-                       static_cast<unsigned>(hr), static_cast<unsigned>(status), currentWidth, currentHeight);
+        if (doLog) HLog("decode#%d out: hrOut=0x%08X status=0x%08X w=%d h=%d hw=%d", logId,
+                       static_cast<unsigned>(hr), static_cast<unsigned>(status), currentWidth, currentHeight, d3d11vaEnabled);
         auto tMft = std::chrono::steady_clock::now();
 
-        if (SUCCEEDED(hr) && outMediaBuffer) {
-            BYTE* pData = nullptr;
-            DWORD curLen = 0;
-            outMediaBuffer->Lock(&pData, nullptr, &curLen);
-            if (pData && currentWidth > 0 && currentHeight > 0) {
-                outW = currentWidth;
-                outH = currentHeight;
-                const int cw = currentWidth, ch = currentHeight;
-                if (rawNv12) {
-                    // GPU 路径：不做 CPU 转换，原始 NV12 拷出给调用方
-                    const int stride = currentStride > 0 ? currentStride : cw;
-                    if (outStride) *outStride = stride;
-                    const size_t nv12Size = static_cast<size_t>(stride) * ch * 3 / 2;
-                    outBgra.resize(nv12Size);
-                    std::memcpy(outBgra.data(), pData, nv12Size);
-                } else {
-                    outBgra.resize(static_cast<size_t>(cw) * ch * 4);
-                    if (outputIsArgb) {
-                        // 解码器已直出 BGRA，仅按行进 stride 拷贝
-                        const int srcStride = currentStride > 0 ? currentStride : cw * 4;
-                        uint8_t* d = outBgra.data();
-                        for (int ry = 0; ry < ch; ++ry) {
-                            std::memcpy(d + static_cast<size_t>(ry) * cw * 4,
-                                        pData + static_cast<size_t>(ry) * srcStride,
-                                        static_cast<size_t>(cw) * 4);
-                        }
-                    } else {
-                        const int stride = currentStride > 0 ? currentStride : cw;
-                        ConvertNV12ToBGRA_Fast(pData, cw, ch, stride, outBgra.data());
+        IMFSample* resSample = outputDataBuffer.pSample ? outputDataBuffer.pSample : outSample;
+        if (SUCCEEDED(hr) && resSample) {
+            IMFMediaBuffer* pMediaBuffer = nullptr;
+            if (SUCCEEDED(resSample->GetBufferByIndex(0, &pMediaBuffer)) && pMediaBuffer) {
+                BYTE* pData = nullptr;
+                int stride = currentStride > 0 ? currentStride : currentWidth;
+                bool locked2D = false;
+                IMF2DBuffer* p2DBuffer = nullptr;
+                if (SUCCEEDED(pMediaBuffer->QueryInterface(IID_PPV_ARGS(&p2DBuffer)))) {
+                    LONG pitch = 0;
+                    if (SUCCEEDED(p2DBuffer->Lock2D(&pData, &pitch))) {
+                        stride = static_cast<int>(pitch);
+                        locked2D = true;
                     }
                 }
-                outMediaBuffer->Unlock();
-
-                auto tConv = std::chrono::steady_clock::now();
-                static double sMftSum = 0, sConvSum = 0;
-                static int sT = 0;
-                sMftSum += std::chrono::duration_cast<std::chrono::microseconds>(tMft - tEntry).count() / 1000.0;
-                sConvSum += std::chrono::duration_cast<std::chrono::microseconds>(tConv - tMft).count() / 1000.0;
-                if (++sT >= 30) {
-                    HLog("timing avg: MFT解码=%.2fms NV12->BGRA转换=%.2fms (%dx%d)",
-                         sMftSum / sT, sConvSum / sT, currentWidth, currentHeight);
-                    sMftSum = 0; sConvSum = 0; sT = 0;
+                if (!locked2D) {
+                    DWORD curLen = 0;
+                    pMediaBuffer->Lock(&pData, nullptr, &curLen);
                 }
-                return true;
+
+                if (pData && currentWidth > 0 && currentHeight > 0) {
+                    outW = currentWidth;
+                    outH = currentHeight;
+                    const int cw = currentWidth, ch = currentHeight;
+                    if (rawNv12) {
+                        // GPU 路径：原始 NV12 拷出给渲染线程在 GPU 上做着色器转 BGRA
+                        if (outStride) *outStride = stride;
+                        const size_t nv12Size = static_cast<size_t>(stride) * ch * 3 / 2;
+                        outBgra.resize(nv12Size);
+                        std::memcpy(outBgra.data(), pData, nv12Size);
+                    } else {
+                        outBgra.resize(static_cast<size_t>(cw) * ch * 4);
+                        if (outputIsArgb) {
+                            const int srcStride = currentStride > 0 ? currentStride : cw * 4;
+                            uint8_t* d = outBgra.data();
+                            for (int ry = 0; ry < ch; ++ry) {
+                                std::memcpy(d + static_cast<size_t>(ry) * cw * 4,
+                                            pData + static_cast<size_t>(ry) * srcStride,
+                                            static_cast<size_t>(cw) * 4);
+                            }
+                        } else {
+                            ConvertNV12ToBGRA_Fast(pData, cw, ch, stride, outBgra.data());
+                        }
+                    }
+
+                    if (locked2D && p2DBuffer) {
+                        p2DBuffer->Unlock2D();
+                    } else {
+                        pMediaBuffer->Unlock();
+                    }
+                    if (p2DBuffer) p2DBuffer->Release();
+                    pMediaBuffer->Release();
+                    if (providesSamples && outputDataBuffer.pSample) {
+                        outputDataBuffer.pSample->Release();
+                    }
+
+                    auto tConv = std::chrono::steady_clock::now();
+                    static double sMftSum = 0, sConvSum = 0;
+                    static int sT = 0;
+                    sMftSum += std::chrono::duration_cast<std::chrono::microseconds>(tMft - tEntry).count() / 1000.0;
+                    sConvSum += std::chrono::duration_cast<std::chrono::microseconds>(tConv - tMft).count() / 1000.0;
+                    if (++sT >= 30) {
+                        HLog("timing avg: %s=%.2fms NV12->BGRA转换=%.2fms (%dx%d)",
+                             d3d11vaEnabled ? "D3D11VA硬解" : "MFT软解",
+                             sMftSum / sT, sConvSum / sT, currentWidth, currentHeight);
+                        sMftSum = 0; sConvSum = 0; sT = 0;
+                    }
+                    return true;
+                }
+
+                if (locked2D && p2DBuffer) {
+                    p2DBuffer->Unlock2D();
+                } else if (pData) {
+                    pMediaBuffer->Unlock();
+                }
+                if (p2DBuffer) p2DBuffer->Release();
+                pMediaBuffer->Release();
             }
-            outMediaBuffer->Unlock();
+        }
+        if (providesSamples && outputDataBuffer.pSample) {
+            outputDataBuffer.pSample->Release();
         }
 
         return false;
@@ -426,7 +509,7 @@ struct H264Decoder::Impl {
 H264Decoder::H264Decoder() : impl_(std::make_unique<Impl>()) {}
 H264Decoder::~H264Decoder() { Shutdown(); }
 
-bool H264Decoder::Init() { return impl_->Init(); }
+bool H264Decoder::Init(ID3D11Device* d3dDevice) { return impl_->Init(d3dDevice); }
 void H264Decoder::Shutdown() { impl_->Shutdown(); }
 bool H264Decoder::DecodeFrame(const uint8_t* data, size_t size, std::vector<uint8_t>& outBgra, int& outW, int& outH,
                               bool rawNv12, int* outStride) {

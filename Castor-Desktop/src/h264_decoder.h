@@ -3,6 +3,7 @@
 #include <vector>
 #include <cstdint>
 #include <memory>
+#include <d3d11.h>
 
 namespace CastorVideo {
 
@@ -11,8 +12,8 @@ public:
     H264Decoder();
     ~H264Decoder();
 
-    // 初始化硬件低延迟解码器 (Windows Media Foundation MFT)
-    bool Init();
+    // 初始化低延迟解码器 (Windows Media Foundation MFT，支持 D3D11VA 硬件加速)
+    bool Init(ID3D11Device* d3dDevice = nullptr);
     void Shutdown();
 
     // 解码单个 H.264 帧 (Annex-B 格式，包含 00 00 00 01 NALU 起始码)

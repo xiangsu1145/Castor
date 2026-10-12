@@ -113,7 +113,7 @@ void H264UdpReceiver::Run() {
     }
     ULog("[H264UDP] bind OK, listening UDP %u", port_);
 
-    decoder_.Init();
+    decoder_.Init(d3dDevice_);
 
     // 解码线程：与收包线程解耦，只取"最新"一帧解码，旧的直接丢（反缓冲膨胀）
     std::thread decoderThread([this]() { DecodeLoop(); });
@@ -135,6 +135,7 @@ void H264UdpReceiver::Run() {
     sockaddr_in lastFrom{};
     int lastFromLen = 0;
     int consecutiveDrops = 0;
+    uint32_t lastCompletedSeq = 0;
     auto lastIdrReq = std::chrono::steady_clock::now();
     auto winStart = std::chrono::steady_clock::now();
 
@@ -157,10 +158,14 @@ void H264UdpReceiver::Run() {
                     p.fragCount = h.fragCount;
                     p.frags.assign(h.fragCount, {});
                     p.have.assign(h.fragCount, false);
-                    if (pending.size() > 8) {
+                    if (pending.size() > 4) {
                         uint32_t oldestKey = 0; bool found = false;
                         for (auto& kv : pending) { if (!found || kv.first < oldestKey) { oldestKey = kv.first; found = true; } }
-                        if (found && oldestKey != h.frameSeq) { pending.erase(oldestKey); droppedFrames_.fetch_add(1); }
+                        if (found && oldestKey != h.frameSeq) {
+                            pending.erase(oldestKey);
+                            droppedFrames_.fetch_add(1);
+                            needIdr_.store(true); // 丢弃未收齐分片的残缺帧，立即请求 IDR 修复宏块错位模糊
+                        }
                     }
                 }
                 if (!p.have[h.fragIndex]) {
@@ -170,6 +175,12 @@ void H264UdpReceiver::Run() {
                 }
                 if (p.received == p.fragCount) {
                     const int fragCount = p.fragCount;
+
+                    // 检查是否发生跨帧丢失（seq 跳变）：丢失 P 帧会破坏运动矢量，触发 IDR 迅速自愈
+                    if (lastCompletedSeq != 0 && h.frameSeq > lastCompletedSeq + 1) {
+                        needIdr_.store(true);
+                    }
+                    lastCompletedSeq = h.frameSeq;
 
                     // 从回收池取一块缓冲复用，避免逐帧 malloc
                     std::vector<uint8_t> frame;
@@ -211,10 +222,10 @@ void H264UdpReceiver::Run() {
             }
         }
 
-        // 解码线程解不出画面 / 连续丢帧时会置 needIdr_，限速 2000ms 回发 !IDR 请求关键帧。
+        // 解码线程解不出画面 / 检测到丢帧时置 needIdr_，限速 600ms 回发 !IDR 请求关键帧自愈。
         if (needIdr_.load() && lastFromLen > 0) {
             auto nowIdr = std::chrono::steady_clock::now();
-            if (std::chrono::duration_cast<std::chrono::milliseconds>(nowIdr - lastIdrReq).count() >= 2000) {
+            if (std::chrono::duration_cast<std::chrono::milliseconds>(nowIdr - lastIdrReq).count() >= 600) {
                 lastIdrReq = nowIdr;
                 needIdr_.store(false);
                 const char idrReq[4] = {'!', 'I', 'D', 'R'};
