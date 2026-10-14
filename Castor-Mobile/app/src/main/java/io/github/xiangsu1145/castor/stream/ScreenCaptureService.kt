@@ -42,6 +42,7 @@ class ScreenCaptureService : Service() {
     private var currentWidth: Int = 1080
     private var currentHeight: Int = 1920
     private var currentCenterRoiSize: Int = 640
+    private var currentOuterQualityPercent: Int = 60
 
     private var statusCallback: ((Boolean, String) -> Unit)? = null
     private var statsCallback: ((Float, Float) -> Unit)? = null
@@ -63,6 +64,17 @@ class ScreenCaptureService : Service() {
         this.targetFps = fps.coerceIn(15, 144)
     }
 
+    fun updateBitrate(bitrateMbps: Int) {
+        this.udpBitrateMbps = bitrateMbps.coerceIn(8, 40)
+        udpStreamer?.updateBitrate(this.udpBitrateMbps)
+    }
+
+    fun updateOuterQuality(outerQualityPercent: Int) {
+        this.currentOuterQualityPercent = outerQualityPercent.coerceIn(10, 100)
+        val calculatedBitrate = (8 + (this.currentOuterQualityPercent * 0.22f)).toInt().coerceIn(10, 32)
+        updateBitrate(calculatedBitrate)
+    }
+
     fun updateResolution(newWidth: Int, newHeight: Int, densityDpi: Int) {
         if (!capturing) return
         this.currentWidth = newWidth
@@ -76,7 +88,8 @@ class ScreenCaptureService : Service() {
         if (udpStreamer != null && !ip.isNullOrEmpty()) {
             startUdpStream(
                 ip, udpTargetPort, currentWidth, currentHeight,
-                targetFps, udpBitrateMbps, currentDensityDpi, currentCenterRoiSize, cbStatus, cbStats
+                targetFps, udpBitrateMbps, currentDensityDpi, currentCenterRoiSize,
+                currentOuterQualityPercent, cbStatus, cbStats
             )
         } else {
             startStreaming(
@@ -91,6 +104,28 @@ class ScreenCaptureService : Service() {
     override fun onCreate() {
         super.onCreate()
         createNotificationChannel()
+    }
+
+    var onProjectionReady: (() -> Unit)? = null
+
+    fun hasProjection(): Boolean = mediaProjection != null
+
+    private fun setupProjection(resultCode: Int, resultData: Intent) {
+        try {
+            val projectionManager = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
+            mediaProjection?.stop()
+            val projection = projectionManager.getMediaProjection(resultCode, resultData)
+            if (projection != null) {
+                projection.registerCallback(projectionCallback, mainHandler)
+                mediaProjection = projection
+                Log.d(TAG, "MediaProjection 前台服务初始化成功")
+                mainHandler.post {
+                    onProjectionReady?.invoke()
+                }
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "创建 MediaProjection 失败: ${e.message}", e)
+        }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -114,25 +149,10 @@ class ScreenCaptureService : Service() {
         }
 
         if (resultCode == Activity.RESULT_OK && resultData != null) {
-            setProjectionData(resultCode, resultData)
+            setupProjection(resultCode, resultData)
         }
 
         return START_NOT_STICKY
-    }
-
-    fun setProjectionData(resultCode: Int, resultData: Intent) {
-        try {
-            val projectionManager = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
-            mediaProjection?.stop()
-            val projection = projectionManager.getMediaProjection(resultCode, resultData)
-            if (projection != null) {
-                projection.registerCallback(projectionCallback, mainHandler)
-                mediaProjection = projection
-                Log.d(TAG, "MediaProjection 初始化成功")
-            }
-        } catch (e: Exception) {
-            Log.e(TAG, "创建 MediaProjection 失败: ${e.message}", e)
-        }
     }
 
     fun startStreaming(
@@ -245,6 +265,7 @@ class ScreenCaptureService : Service() {
         bitrateMbps: Int,
         densityDpi: Int,
         centerRoiSize: Int = 640,
+        outerQualityPercent: Int = 60,
         onStatusChanged: (Boolean, String) -> Unit,
         onStatsUpdated: (Float, Float) -> Unit
     ) {
@@ -253,6 +274,7 @@ class ScreenCaptureService : Service() {
         this.currentWidth = width
         this.currentHeight = height
         this.currentCenterRoiSize = centerRoiSize
+        this.currentOuterQualityPercent = outerQualityPercent
         this.statusCallback = onStatusChanged
         this.statsCallback = onStatsUpdated
         this.udpTargetIp = targetIp

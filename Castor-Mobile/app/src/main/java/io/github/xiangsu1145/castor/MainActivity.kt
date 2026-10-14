@@ -13,6 +13,8 @@ import android.media.projection.MediaProjectionManager
 import android.os.Build
 import android.os.Bundle
 import android.os.IBinder
+import android.transition.AutoTransition
+import android.transition.TransitionManager
 import android.util.DisplayMetrics
 import android.util.TypedValue
 import android.view.Display
@@ -46,6 +48,10 @@ class MainActivity : AppCompatActivity() {
     private lateinit var ndiNameEditText: TextInputEditText
     private lateinit var actionButton: MaterialButton
     private lateinit var liveStatsText: MaterialTextView
+    private lateinit var rootScrollView: NestedScrollView
+    private lateinit var videoConfigCard: MaterialCardView
+    private lateinit var btnUdpMode: MaterialButton
+    private lateinit var btnNdiMode: MaterialButton
 
     // 当前推流参数
     private var screenPhysicalW = 2120
@@ -60,6 +66,7 @@ class MainActivity : AppCompatActivity() {
     private var lanDiscovery: LanDiscovery? = null
     private var ndiNameLayout: TextInputLayout? = null
     private var centerRoiSize = 640     // 屏幕中心原画分辨率 (100~1000)
+    private var outerQualityPercent = 60 // 外围区域画质百分比 (10% ~ 100%)
     private var roiSliderLayout: LinearLayout? = null
 
     // 真实屏幕尺寸：走 DisplayManager 的默认显示，跟随系统旋转（不受本 Activity 竖屏锁定影响）。
@@ -75,15 +82,10 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private var pendingProjectionCode: Int? = null
-    private var pendingProjectionData: Intent? = null
-
     private val projectionLauncher = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult()
     ) { result ->
         if (result.resultCode == Activity.RESULT_OK && result.data != null) {
-            pendingProjectionCode = result.resultCode
-            pendingProjectionData = result.data
             val serviceIntent = Intent(this, ScreenCaptureService::class.java).apply {
                 putExtra("resultCode", result.resultCode)
                 putExtra("resultData", result.data)
@@ -93,10 +95,7 @@ class MainActivity : AppCompatActivity() {
             } else {
                 startService(serviceIntent)
             }
-            if (captureService != null && isBound) {
-                captureService?.setProjectionData(result.resultCode, result.data!!)
-                startActiveStream()
-            } else {
+            if (!isBound) {
                 bindService(serviceIntent, serviceConnection, Context.BIND_AUTO_CREATE)
             }
         } else {
@@ -111,10 +110,12 @@ class MainActivity : AppCompatActivity() {
             val svc = binder.getService()
             captureService = svc
             isBound = true
-            if (pendingProjectionCode != null && pendingProjectionData != null) {
-                svc.setProjectionData(pendingProjectionCode!!, pendingProjectionData!!)
+            svc.onProjectionReady = {
+                runOnUiThread { startActiveStream() }
             }
-            startActiveStream()
+            if (svc.hasProjection()) {
+                runOnUiThread { startActiveStream() }
+            }
         }
 
         override fun onServiceDisconnected(name: ComponentName?) {
@@ -193,6 +194,7 @@ class MainActivity : AppCompatActivity() {
                 0, 1.0f
             )
         }
+        rootScrollView = scrollView
 
         val contentLayout = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -203,11 +205,13 @@ class MainActivity : AppCompatActivity() {
             )
         }
 
-        // 卡片 1: NDI 局域网广播服务配置
+        // 卡片 1: 投屏连接与传输配置
         contentLayout.addView(buildNdiServiceCard())
 
-        // 卡片 2: NDI 视频规格与调优
-        contentLayout.addView(buildVideoConfigCard())
+        // 卡片 2: 画面规格设置 (投屏时将自动收起)
+        val vCard = buildVideoConfigCard()
+        videoConfigCard = vCard
+        contentLayout.addView(vCard)
 
         // 卡片 3: 实时推流监控
         contentLayout.addView(buildStatusCard())
@@ -215,7 +219,50 @@ class MainActivity : AppCompatActivity() {
         scrollView.addView(contentLayout)
         rootLayout.addView(scrollView)
 
+        updateModeSelection(useUdp)
+
         return rootLayout
+    }
+
+    private fun updateModeSelection(isUdp: Boolean) {
+        useUdp = isUdp
+        if (!::btnUdpMode.isInitialized || !::btnNdiMode.isInitialized) return
+
+        val primaryColor = MaterialColors.getColor(btnUdpMode, androidx.appcompat.R.attr.colorPrimary)
+        val onPrimaryColor = MaterialColors.getColor(btnUdpMode, com.google.android.material.R.attr.colorOnPrimary)
+        val outlineColor = MaterialColors.getColor(btnUdpMode, com.google.android.material.R.attr.colorOutline)
+
+        if (useUdp) {
+            btnUdpMode.backgroundTintList = ColorStateList.valueOf(primaryColor)
+            btnUdpMode.setTextColor(onPrimaryColor)
+            btnUdpMode.strokeColor = ColorStateList.valueOf(primaryColor)
+
+            btnNdiMode.backgroundTintList = ColorStateList.valueOf(Color.TRANSPARENT)
+            btnNdiMode.setTextColor(primaryColor)
+            btnNdiMode.strokeColor = ColorStateList.valueOf(outlineColor)
+
+            ndiNameLayout?.visibility = View.GONE
+            roiSliderLayout?.visibility = View.VISIBLE
+            if (::statusTextView.isInitialized && !isStreamingActive) {
+                statusTextView.text = if (pcIp.isNullOrEmpty()) "已选择 UDP 模式，正在搜索电脑..." else "已选择 UDP 模式 (电脑: $pcIp)"
+            }
+            if (::actionButton.isInitialized && !isStreamingActive) actionButton.text = "启动无线投屏"
+        } else {
+            btnNdiMode.backgroundTintList = ColorStateList.valueOf(primaryColor)
+            btnNdiMode.setTextColor(onPrimaryColor)
+            btnNdiMode.strokeColor = ColorStateList.valueOf(primaryColor)
+
+            btnUdpMode.backgroundTintList = ColorStateList.valueOf(Color.TRANSPARENT)
+            btnUdpMode.setTextColor(primaryColor)
+            btnUdpMode.strokeColor = ColorStateList.valueOf(outlineColor)
+
+            ndiNameLayout?.visibility = View.VISIBLE
+            roiSliderLayout?.visibility = View.GONE
+            if (::statusTextView.isInitialized && !isStreamingActive) {
+                statusTextView.text = "已切换到 NDI 兼容模式"
+            }
+            if (::actionButton.isInitialized && !isStreamingActive) actionButton.text = "启动 NDI 广播"
+        }
     }
 
     private fun buildNdiServiceCard(): MaterialCardView {
@@ -271,26 +318,18 @@ class MainActivity : AppCompatActivity() {
                     ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
                 ).apply { setMargins(0, 0, 0, dpToPx(12)) }
             }
-            val btnUdpMode = MaterialButton(context, null, com.google.android.material.R.attr.materialButtonOutlinedStyle).apply {
-                text = "UDP 模式 (推荐)"
+            btnUdpMode = MaterialButton(context, null, com.google.android.material.R.attr.materialButtonOutlinedStyle).apply {
+                text = "UDP 模式 (默认)"
                 layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { setMargins(0, 0, dpToPx(6), 0) }
                 setOnClickListener {
-                    useUdp = true
-                    ndiNameLayout?.visibility = View.GONE
-                    roiSliderLayout?.visibility = View.VISIBLE
-                    statusTextView.text = if (pcIp.isNullOrEmpty()) "已切换到 UDP 模式，正在搜索电脑..." else "已选择 UDP 模式 (电脑: $pcIp)"
-                    if (!isStreamingActive) actionButton.text = "启动无线投屏"
+                    updateModeSelection(true)
                 }
             }
-            val btnNdiMode = MaterialButton(context, null, com.google.android.material.R.attr.materialButtonOutlinedStyle).apply {
+            btnNdiMode = MaterialButton(context, null, com.google.android.material.R.attr.materialButtonOutlinedStyle).apply {
                 text = "NDI 模式 (兼容)"
                 layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
                 setOnClickListener {
-                    useUdp = false
-                    ndiNameLayout?.visibility = View.VISIBLE
-                    roiSliderLayout?.visibility = View.GONE
-                    statusTextView.text = "已切换到 NDI 模式"
-                    if (!isStreamingActive) actionButton.text = "启动 NDI 广播"
+                    updateModeSelection(false)
                 }
             }
             modeRow.addView(btnUdpMode)
@@ -491,12 +530,44 @@ class MainActivity : AppCompatActivity() {
             roiContainer.addView(roiSlider)
 
             val roiHint = MaterialTextView(context).apply {
-                text = "中心画面 1:1 无损原生采集，电脑端用于画中画高清映射与 YOLO 推理"
+                text = "在投屏画面中央保持最高清晰度，适合精细观看"
+                setTextAppearance(com.google.android.material.R.style.TextAppearance_Material3_BodySmall)
+                setTextColor(MaterialColors.getColor(this, com.google.android.material.R.attr.colorOutline))
+                setPadding(0, dpToPx(2), 0, dpToPx(10))
+            }
+            roiContainer.addView(roiHint)
+
+            // 外围区域画质滑动条 (10% ~ 100%)
+            val outerTitle = MaterialTextView(context).apply {
+                text = "外围区域画质: ${outerQualityPercent}%"
+                setTextAppearance(com.google.android.material.R.style.TextAppearance_Material3_BodyMedium)
+                setTextColor(MaterialColors.getColor(this, com.google.android.material.R.attr.colorOnSurface))
+                setPadding(0, 0, 0, dpToPx(4))
+            }
+            roiContainer.addView(outerTitle)
+
+            val outerSlider = com.google.android.material.slider.Slider(context).apply {
+                valueFrom = 10f
+                valueTo = 100f
+                stepSize = 5f
+                value = outerQualityPercent.toFloat()
+                addOnChangeListener { _, value, fromUser ->
+                    outerQualityPercent = value.toInt()
+                    outerTitle.text = "外围区域画质: ${outerQualityPercent}%"
+                    if (fromUser && isStreamingActive) {
+                        captureService?.updateOuterQuality(outerQualityPercent)
+                    }
+                }
+            }
+            roiContainer.addView(outerSlider)
+
+            val outerHint = MaterialTextView(context).apply {
+                text = "调低外围画质可大幅降低发热与带宽消耗，中心原画始终保持高画质"
                 setTextAppearance(com.google.android.material.R.style.TextAppearance_Material3_BodySmall)
                 setTextColor(MaterialColors.getColor(this, com.google.android.material.R.attr.colorOutline))
                 setPadding(0, dpToPx(2), 0, 0)
             }
-            roiContainer.addView(roiHint)
+            roiContainer.addView(outerHint)
 
             inner.addView(roiContainer)
 
@@ -571,15 +642,17 @@ class MainActivity : AppCompatActivity() {
                 updateUiState(false)
                 return
             }
+            val calculatedBitrate = (8 + (outerQualityPercent * 0.22f)).toInt().coerceIn(10, 32)
             svc.startUdpStream(
                 targetIp = ip,
                 targetPort = 27190,
                 width = targetWidth,
                 height = targetHeight,
                 fps = targetFps,
-                bitrateMbps = 20,
+                bitrateMbps = calculatedBitrate,
                 densityDpi = density,
                 centerRoiSize = centerRoiSize,
+                outerQualityPercent = outerQualityPercent,
                 onStatusChanged = { running, msg ->
                     runOnUiThread { updateUiState(running); statusTextView.text = msg }
                 },
@@ -638,6 +711,17 @@ class MainActivity : AppCompatActivity() {
     private fun updateUiState(running: Boolean) {
         isStreamingActive = running
         actionButton.isEnabled = true
+
+        // 开始投屏时平滑动画收起“画面规格设置”卡片，停止投屏时平滑展开
+        if (::rootScrollView.isInitialized && ::videoConfigCard.isInitialized) {
+            val transition = AutoTransition().apply {
+                duration = 280
+                interpolator = android.view.animation.AccelerateDecelerateInterpolator()
+            }
+            TransitionManager.beginDelayedTransition(rootScrollView, transition)
+            videoConfigCard.visibility = if (running) View.GONE else View.VISIBLE
+        }
+
         if (running) {
             actionButton.text = if (useUdp) "停止无线投屏" else "停止 NDI 广播"
             actionButton.backgroundTintList = ColorStateList.valueOf(Color.parseColor("#E53935"))

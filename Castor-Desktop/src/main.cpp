@@ -80,7 +80,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR pCmdLine
     // 创建窗口 (默认 1280x768)
     HWND hwnd = CreateWindowW(
         wc.lpszClassName,
-        L"Castor 极速串流与 AI 推理控制中心 (Direct3D 11 + ImGui)",
+        L"Castor 0.0.1",
         WS_OVERLAPPEDWINDOW,
         100, 100, 1280, 768,
         nullptr, nullptr,
@@ -176,6 +176,24 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR pCmdLine
             videoReceiver.Start(27183);
         }
 
+        // 处理用户主动重置/刷新或断开投屏
+        if (streamConfig.requestResetStream || streamConfig.requestDisconnect) {
+            streamConfig.requestResetStream = false;
+            streamConfig.requestDisconnect = false;
+            lastH264Seq = 0;
+            lastUdpSeq = 0;
+            lastRoiSeq = 0;
+            g_displaySrv = nullptr;
+            g_roiSrv = nullptr;
+            currentVideoW = 0;
+            currentVideoH = 0;
+            streamConfig.isConnected = false;
+            streamConfig.clientIp[0] = '\0';
+            streamConfig.streamWidth = 0;
+            streamConfig.streamHeight = 0;
+            streamConfig.fpsHistory.clear();
+        }
+
         // 性能日志录制开关 (导出 huilang_perf_*.csv)
         if (streamConfig.requestTogglePerfLog) {
             streamConfig.requestTogglePerfLog = false;
@@ -236,17 +254,34 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR pCmdLine
             }
         }
 
-        // 2. 取帧：私有 H.264 UDP 通道优先，其次 NDI
+        // 2. 取帧：根据接收模式 (1=UDP, 2=NDI, 0=自动检测)
         CastorVideo::FrameBuffer newFrame;
         bool hasUdpFrame = false;
-        if (h264Udp.AcquireLatestFrame(newFrame, lastH264Seq)) {
-            lastH264Seq = newFrame.seq;
-            hasUdpFrame = true;
-            streamConfig.isH264Udp = true;
-        } else if (videoReceiver.AcquireLatestFrame(newFrame, lastUdpSeq)) {
-            lastUdpSeq = newFrame.seq;
-            hasUdpFrame = true;
-            streamConfig.isH264Udp = false;
+        if (streamConfig.receiveMode == 1) {
+            // 模式 1: 仅接收 UDP 流
+            if (h264Udp.AcquireLatestFrame(newFrame, lastH264Seq)) {
+                lastH264Seq = newFrame.seq;
+                hasUdpFrame = true;
+                streamConfig.isH264Udp = true;
+            }
+        } else if (streamConfig.receiveMode == 2) {
+            // 模式 2: 仅接收 NDI 流
+            if (videoReceiver.AcquireLatestFrame(newFrame, lastUdpSeq)) {
+                lastUdpSeq = newFrame.seq;
+                hasUdpFrame = true;
+                streamConfig.isH264Udp = false;
+            }
+        } else {
+            // 模式 0: 自动检测，优先检测 UDP 流
+            if (h264Udp.AcquireLatestFrame(newFrame, lastH264Seq)) {
+                lastH264Seq = newFrame.seq;
+                hasUdpFrame = true;
+                streamConfig.isH264Udp = true;
+            } else if (videoReceiver.AcquireLatestFrame(newFrame, lastUdpSeq)) {
+                lastUdpSeq = newFrame.seq;
+                hasUdpFrame = true;
+                streamConfig.isH264Udp = false;
+            }
         }
         if (hasUdpFrame) {
             streamConfig.isConnected = true;
@@ -398,20 +433,26 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR pCmdLine
         streamConfig.ndiDropped = videoReceiver.DroppedVideoFrames();
         streamConfig.ndiQueue = videoReceiver.QueueVideoDepth();
 
-        // 2.1 尝试获取中心 1:1 原画帧 (UDP 27192)
+        // 2.1 尝试获取中心 1:1 原画帧 (UDP 27192) - 仅在非 NDI 模式下启用
         CastorVideo::FrameBuffer newRoiFrame;
         bool hasRoiFrame = false;
-        if (h264Roi.AcquireLatestFrame(newRoiFrame, lastRoiSeq)) {
-            lastRoiSeq = newRoiFrame.seq;
-            hasRoiFrame = true;
-        }
-        if (hasRoiFrame && newRoiFrame.nv12Frame && newRoiFrame.rgba && !newRoiFrame.rgba->empty()) {
-            if (h264Roi.EnsureGpu(newRoiFrame.width, newRoiFrame.height) &&
-                h264Roi.ConvertOnGpu(newRoiFrame.rgba->data(), newRoiFrame.width, newRoiFrame.height, newRoiFrame.nv12Stride)) {
-                g_roiSrv = h264Roi.GpuSrv();
-                g_roiW = newRoiFrame.width;
-                g_roiH = newRoiFrame.height;
+        if (streamConfig.receiveMode != 2) {
+            if (h264Roi.AcquireLatestFrame(newRoiFrame, lastRoiSeq)) {
+                lastRoiSeq = newRoiFrame.seq;
+                hasRoiFrame = true;
             }
+            if (hasRoiFrame && newRoiFrame.nv12Frame && newRoiFrame.rgba && !newRoiFrame.rgba->empty()) {
+                if (h264Roi.EnsureGpu(newRoiFrame.width, newRoiFrame.height) &&
+                    h264Roi.ConvertOnGpu(newRoiFrame.rgba->data(), newRoiFrame.width, newRoiFrame.height, newRoiFrame.nv12Stride)) {
+                    g_roiSrv = h264Roi.GpuSrv();
+                    g_roiW = newRoiFrame.width;
+                    g_roiH = newRoiFrame.height;
+                }
+            }
+        } else {
+            g_roiSrv = nullptr;
+            g_roiW = 0;
+            g_roiH = 0;
         }
         streamConfig.hasRoiStream = (g_roiSrv != nullptr && g_roiW > 0);
         streamConfig.roiWidth = g_roiW;

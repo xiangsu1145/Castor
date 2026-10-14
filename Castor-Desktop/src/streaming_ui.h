@@ -51,8 +51,13 @@ struct StreamConfig {
     int64_t ndiDropped = 0;
     int ndiQueue = 0;
 
-    // 通道选择：true = 私有 H.264 UDP 通道当前在出画；false = NDI
-    bool isH264Udp = false;
+    // 画面接收模式：0 = 自动检测, 1 = UDP 模式 (默认/低延迟), 2 = NDI 模式 (兼容)
+    int receiveMode = 1;
+    bool requestResetStream = false;     // 重置/刷新接收
+    bool requestDisconnect = false;      // 断开当前画面
+
+    // 当前通道状态
+    bool isH264Udp = true;
     float h264UdpMbps = 0.0f;
 
     // 中心原画 (Picture-in-Picture / ROI) 状态
@@ -61,18 +66,18 @@ struct StreamConfig {
     int roiHeight = 0;
     float roiFps = 0.0f;
     float roiMbps = 0.0f;
-    bool showRoiBoundary = true; // 是否在中心原画四周显示微弱对齐框
+    bool showRoiBoundary = true; // 是否在中心原画四周显示微弱定位框
 
     // 画面与辅助功能设置
     bool showCrosshair = false;
     bool enableCenterRoiOnly = false;
-    int roiPercent = 50;          // 中心区域占比 50%
+    int roiPercent = 50;          // 中心区域占比
     bool showHud = true;
 
-    // NDI 接收带宽 + 性能日志 (PC 端优化控制)
-    int bandwidth = 100;                 // 0=lowest(自动降档/降分辨率) ~ 100=highest(全分辨率)
-    bool requestApplyBandwidth = false;  // 置位后由主循环调用 SetBandwidth
-    bool requestTogglePerfLog = false;   // 置位后由主循环切换 CSV 录制
+    // 后台控制字段
+    int bandwidth = 100;
+    bool requestApplyBandwidth = false;
+    bool requestTogglePerfLog = false;
     bool perfRecording = false;
 };
 

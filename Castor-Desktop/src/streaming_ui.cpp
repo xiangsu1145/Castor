@@ -53,98 +53,101 @@ void StreamingUI::Render(StreamConfig& config, float screenWidth, float screenHe
 
 void StreamingUI::RenderSidebar(StreamConfig& config) {
     ImGui::Spacing();
-    ImGui::TextColored(ImVec4(0.00f, 0.86f, 0.88f, 1.0f), "CASTOR NDI 极速串流中心");
-    ImGui::TextDisabled("协议: NewTek NDI 6 广电级低延迟传输 | 渲染: DirectX 11");
+    ImGui::TextColored(ImVec4(0.00f, 0.86f, 0.88f, 1.0f), "Castor 投屏接收端");
+    ImGui::TextDisabled("版本: 0.0.1 | 渲染引擎: DirectX 11");
     ImGui::Separator();
     ImGui::Spacing();
 
-    // 卡片 1: NDI 局域网服务状态
-    if (ImGui::CollapsingHeader("NDI 局域网接收状态", ImGuiTreeNodeFlags_DefaultOpen)) {
+    // 卡片 1: 接收模式与设备连接
+    if (ImGui::CollapsingHeader("接收设置与连接", ImGuiTreeNodeFlags_DefaultOpen)) {
         ImGui::Spacing();
-        ImGui::Text("传输协议:");
-        ImGui::SameLine();
-        ImGui::TextColored(ImVec4(0.0f, 0.86f, 0.88f, 1.0f), "NDI 6 (mDNS 零配置自动发现)");
+        ImGui::Text("画面接收模式:");
 
-        ImGui::Text("接收格式:");
-        ImGui::SameLine();
-        ImGui::TextColored(ImVec4(0.1f, 1.0f, 0.5f, 1.0f), "BGRA 32bit (DirectX 11 显存直连)");
+        bool modeChanged = false;
+        if (ImGui::RadioButton("UDP 模式 (默认 / 低延迟)", config.receiveMode == 1)) {
+            config.receiveMode = 1;
+            modeChanged = true;
+        }
+        if (ImGui::RadioButton("NDI 模式 (兼容模式)", config.receiveMode == 2)) {
+            config.receiveMode = 2;
+            modeChanged = true;
+        }
+        if (ImGui::RadioButton("自动检测", config.receiveMode == 0)) {
+            config.receiveMode = 0;
+            modeChanged = true;
+        }
+
+        if (modeChanged) {
+            config.requestResetStream = true;
+        }
+
+        ImGui::Spacing();
+        if (config.receiveMode == 1) {
+            ImGui::TextDisabled("说明: Castor 专属高速低延迟协议，支持中心原画。");
+        } else if (config.receiveMode == 2) {
+            ImGui::TextDisabled("说明: 通用投屏协议，兼容第三方 NDI 格式发送端。");
+        } else {
+            ImGui::TextDisabled("说明: 优先接收 UDP 流，若无则自动接收 NDI 流。");
+        }
+
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::Spacing();
+
+        ImGui::Text("本机 IP 地址: %s", config.hostIp);
+        ImGui::Text("接收监听端口: 27190 (UDP) / 27183 (NDI)");
 
         ImGui::Spacing();
         ImGui::Separator();
         ImGui::Spacing();
 
         if (config.isConnected) {
-            ImGui::TextColored(ImVec4(0.2f, 1.0f, 0.4f, 1.0f), "[● NDI 信号源已接入]");
+            ImGui::TextColored(ImVec4(0.2f, 1.0f, 0.4f, 1.0f), "[● 投屏已连接]");
             if (config.clientIp[0] != '\0') {
-                ImGui::Text("当前设备:");
-                ImGui::SameLine();
-                ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.2f, 1.0f), "%s", config.clientIp);
+                ImGui::Text("来源设备: %s", config.clientIp);
             }
             if (config.streamWidth > 0 && config.streamHeight > 0) {
                 ImGui::Text("画面分辨率: %d x %d", config.streamWidth, config.streamHeight);
             }
             ImGui::Text("已接收帧数: %llu 帧", config.totalFramesReceived);
         } else {
-            ImGui::TextColored(ImVec4(1.0f, 0.7f, 0.2f, 1.0f), "[○ 等待 NDI 源上线...]");
-            ImGui::TextDisabled("自动监听中：支持安卓自研端与苹果【畅想NDI】");
+            ImGui::TextColored(ImVec4(1.0f, 0.7f, 0.2f, 1.0f), "[○ 等待投屏连接...]");
+            ImGui::TextDisabled("提示: 确保手机和电脑在同一 Wi-Fi 下，手机点击【启动无线投屏】即可自动连接。");
+        }
+
+        ImGui::Spacing();
+        if (ImGui::Button("刷新 / 重新等待连接", ImVec2(-1, 30))) {
+            config.requestResetStream = true;
+        }
+        if (config.isConnected) {
             ImGui::Spacing();
-            ImGui::TextWrapped("提示: 只要手机和电脑在同一个 Wi-Fi 下，手机开启推流电脑即可秒级自动连接，无需手动输入 IP。");
+            if (ImGui::Button("断开当前画面", ImVec2(-1, 26))) {
+                config.requestDisconnect = true;
+            }
         }
         ImGui::Spacing();
     }
 
     ImGui::Spacing();
 
-    // 卡片 2: 实时性能与延迟监控
-    if (ImGui::CollapsingHeader("实时性能与延迟监控", ImGuiTreeNodeFlags_DefaultOpen)) {
+    // 卡片 2: 画面与运行状态
+    if (ImGui::CollapsingHeader("运行状态", ImGuiTreeNodeFlags_DefaultOpen)) {
         ImGui::Spacing();
         if (config.isConnected && config.currentFps > 0.1f) {
             if (config.isH264Udp) {
-                ImGui::TextColored(ImVec4(0.2f, 1.0f, 0.5f, 1.0f), "通道: 私有 UDP H.264  (%.1f Mbps)", config.h264UdpMbps);
+                ImGui::TextColored(ImVec4(0.2f, 1.0f, 0.5f, 1.0f), "当前协议: UDP 模式 (%.1f Mbps)", config.h264UdpMbps);
             } else {
-                ImGui::TextColored(ImVec4(0.0f, 0.86f, 0.88f, 1.0f), "通道: NDI (Full/SpeedHQ)");
+                ImGui::TextColored(ImVec4(0.0f, 0.86f, 0.88f, 1.0f), "当前协议: NDI 模式");
             }
-            ImGui::Text("接收帧率 (PC 实测): ");
+            ImGui::Text("接收帧率: ");
             ImGui::SameLine();
             ImGui::TextColored(ImVec4(0.0f, 0.86f, 0.88f, 1.0f), "%.1f FPS", config.currentFps);
 
-            if (config.hasPhoneStats) {
-                ImGui::Text("手机发送帧率 (手机实测): ");
-                ImGui::SameLine();
-                ImGui::TextColored(ImVec4(0.2f, 1.0f, 0.5f, 1.0f), "%.1f FPS", config.phoneFps);
-            }
-
-            ImGui::Text("D3D11 呈现帧率: ");
+            ImGui::Text("界面渲染帧率: ");
             ImGui::SameLine();
             ImGui::TextColored(ImVec4(0.2f, 1.0f, 0.5f, 1.0f), "%.1f FPS", config.renderFps);
 
-            ImGui::Separator();
-            ImGui::Text("实测耗时分解 (全部真实测量):");
-            if (config.hasPhoneStats) {
-                ImGui::Text("  [手机] 采集帧间隔    : %.2f ms", config.phoneIntervalMs);
-                ImGui::Text("  [手机] 取帧          : %.2f ms", config.phoneAcquireMs);
-                ImGui::Text("  [手机] RGBA->NDI 发送: %.2f ms", config.phoneSendMs);
-            } else {
-                ImGui::TextDisabled("  [手机] 等待 metadata 上报...");
-            }
-            ImGui::Text("  [PC]  NDI 抓帧+拷贝  : %.2f ms", config.pcRecvMs);
-            ImGui::Text("  [PC]  显存上传       : %.2f ms", config.pcUploadMs);
-            ImGui::Text("  [PC]  绘制 / 呈现    : %.2f / %.2f ms", config.pcDrawMs, config.pcPresentMs);
-            ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.2f, 1.0f),
-                "  已实测各段合计: %.2f ms (不含网络段)", config.measuredSumMs);
-            ImGui::TextDisabled("  说明: 手机<->PC 时钟未同步, 真·端到端需时钟同步, 故不显示估计值");
-
-            ImGui::Separator();
-            ImGui::Text("NDI 官方诊断 (判断瓶颈在谁):");
-            ImGui::Text("  累计送达 %lld 帧 | 累计丢弃 %lld 帧 | 队列 %d",
-                static_cast<long long>(config.ndiDelivered),
-                static_cast<long long>(config.ndiDropped),
-                config.ndiQueue);
-            if (config.ndiDropped > 0) {
-                ImGui::TextDisabled("  丢弃>0: NDI 收到但本端消费不及 → PC 端瓶颈");
-            } else {
-                ImGui::TextDisabled("  丢弃≈0 仍低帧率: 帧未送达 → 网络/发送端瓶颈");
-            }
+            ImGui::Text("渲染耗时: %.2f ms", config.renderMs);
 
             if (!config.fpsHistory.empty()) {
                 char overlay[32];
@@ -156,13 +159,13 @@ void StreamingUI::RenderSidebar(StreamConfig& config) {
 
             if (config.hasRoiStream) {
                 ImGui::Separator();
-                ImGui::TextColored(ImVec4(0.0f, 0.86f, 0.88f, 1.0f), "● 屏幕中心 1:1 原画流");
-                ImGui::Text("  原画规格: %dx%d (点对点无损)", config.roiWidth, config.roiHeight);
-                ImGui::Text("  原画帧率: %.1f FPS | 带宽: %.1f Mbps", config.roiFps, config.roiMbps);
+                ImGui::TextColored(ImVec4(0.0f, 0.86f, 0.88f, 1.0f), "● 屏幕中心高清区域");
+                ImGui::Text("  原画规格: %dx%d (18 Mbps 高码率)", config.roiWidth, config.roiHeight);
+                ImGui::Text("  原画帧率: %.1f FPS", config.roiFps);
                 ImGui::Checkbox("显示中心原画定位框", &config.showRoiBoundary);
             }
         } else {
-            ImGui::TextDisabled("NDI 帧率: -- FPS (未推流)");
+            ImGui::TextDisabled("当前未推流，暂无运行数据");
         }
         ImGui::Spacing();
     }
@@ -172,48 +175,19 @@ void StreamingUI::RenderSidebar(StreamConfig& config) {
     // 卡片 3: 画面辅助设置
     if (ImGui::CollapsingHeader("画面辅助与准星", ImGuiTreeNodeFlags_DefaultOpen)) {
         ImGui::Spacing();
-        ImGui::Checkbox("显示右上角性能 HUD", &config.showHud);
+        ImGui::Checkbox("显示右上角状态浮窗 (HUD)", &config.showHud);
         ImGui::Checkbox("显示中心十字准星", &config.showCrosshair);
-        ImGui::Checkbox("显示中心高亮区域", &config.enableCenterRoiOnly);
+        ImGui::Checkbox("高亮屏幕中心区域", &config.enableCenterRoiOnly);
 
         if (config.enableCenterRoiOnly) {
-            ImGui::SliderInt("区域占比 (%)", &config.roiPercent, 20, 80);
-        }
-        ImGui::Spacing();
-    }
-
-    ImGui::Spacing();
-
-    // 卡片 4: PC 端优化控制 (NDI 接收带宽 + 延迟链 CSV 日志)
-    if (ImGui::CollapsingHeader("PC 端优化控制", ImGuiTreeNodeFlags_DefaultOpen)) {
-        ImGui::Spacing();
-        ImGui::Text("NDI 接收带宽请求:");
-        ImGui::SameLine();
-        ImGui::TextColored(ImVec4(0.0f, 0.86f, 0.88f, 1.0f),
-                           "%s", config.bandwidth <= 0 ? "lowest" :
-                                 (config.bandwidth >= 100 ? "highest" : "自定义"));
-        if (ImGui::SliderInt("##ndi_bandwidth", &config.bandwidth, 0, 100, "带宽 %d")) {
-            config.requestApplyBandwidth = true;
-        }
-        ImGui::TextDisabled("lowest 会连带让发送端降分辨率换帧率；改后自动重连生效");
-
-        ImGui::Spacing();
-        ImGui::Separator();
-        ImGui::Spacing();
-        if (ImGui::Button(config.perfRecording ? "停止并导出性能日志" : "录制性能日志 (CSV)", ImVec2(-1, 0))) {
-            config.requestTogglePerfLog = true;
-        }
-        if (config.perfRecording) {
-            ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), "● 录制中... 再次点击导出 huilang_perf_*.csv");
-        } else {
-            ImGui::TextDisabled("导出每帧 抓帧/上传/绘制/呈现 耗时");
+            ImGui::SliderInt("高亮区域大小 (%)", &config.roiPercent, 20, 80);
         }
         ImGui::Spacing();
     }
 
     ImGui::Spacing();
     ImGui::Separator();
-    ImGui::TextDisabled("技术栈: NDI 6 + DirectX 11 | 广播级超低延迟架构");
+    ImGui::TextDisabled("Castor 无线投屏工具");
 }
 
 void StreamingUI::RenderMainView(StreamConfig& config, void* videoTextureSrv, int videoW, int videoH,
@@ -257,7 +231,7 @@ void StreamingUI::RenderMainView(StreamConfig& config, void* videoTextureSrv, in
 
             if (config.showRoiBoundary) {
                 drawList->AddRect(roiPos, roiEnd, IM_COL32(0, 210, 211, 180), 0.0f, 0, 1.2f);
-                drawList->AddText(ImVec2(roiPos.x + 6, roiPos.y + 6), IM_COL32(0, 210, 211, 220), "[中心原画 1:1]");
+                drawList->AddText(ImVec2(roiPos.x + 6, roiPos.y + 6), IM_COL32(0, 210, 211, 220), "[中心原画]");
             }
         }
 
@@ -269,7 +243,7 @@ void StreamingUI::RenderMainView(StreamConfig& config, void* videoTextureSrv, in
             ImVec2 roiMax = ImVec2(center.x + roiW * 0.5f, center.y + roiH * 0.5f);
 
             drawList->AddRect(roiMin, roiMax, IM_COL32(0, 210, 211, 200), 4.0f, 0, 1.5f);
-            drawList->AddText(ImVec2(roiMin.x + 8, roiMin.y + 8), IM_COL32(0, 210, 211, 240), "[中心聚焦区域]");
+            drawList->AddText(ImVec2(roiMin.x + 8, roiMin.y + 8), IM_COL32(0, 210, 211, 240), "[中心高亮区域]");
         }
 
         // 可选：十字准星辅助
@@ -285,26 +259,26 @@ void StreamingUI::RenderMainView(StreamConfig& config, void* videoTextureSrv, in
         }
     } else {
         // 未接入时的清晰引导界面
-        float centerY = p0.y + avail.y * 0.40f;
+        float centerY = p0.y + avail.y * 0.38f;
 
-        const char* title = "Castor NDI 极速串流接收器已就绪";
+        const char* title = "等待投屏连接...";
         ImVec2 titleSize = ImGui::CalcTextSize(title);
         drawList->AddText(ImVec2(p0.x + (avail.x - titleSize.x) * 0.5f, centerY),
                           IM_COL32(0, 210, 211, 255), title);
 
-        const char* sub1 = "正在自动监听局域网 NDI 发送源...";
+        const char* sub1 = "请确保手机与电脑连接在同一局域网 (Wi-Fi)";
         ImVec2 sub1Size = ImGui::CalcTextSize(sub1);
         drawList->AddText(ImVec2(p0.x + (avail.x - sub1Size.x) * 0.5f, centerY + 36.0f),
                           IM_COL32(220, 230, 240, 230), sub1);
 
-        const char* sub2 = "支持安卓端 Castor App 或苹果端【畅想 NDI】";
+        const char* sub2 = "在手机端打开 Castor，点击【启动无线投屏】即可自动出画";
         ImVec2 sub2Size = ImGui::CalcTextSize(sub2);
-        drawList->AddText(ImVec2(p0.x + (avail.x - sub2Size.x) * 0.5f, centerY + 70.0f),
+        drawList->AddText(ImVec2(p0.x + (avail.x - sub2Size.x) * 0.5f, centerY + 68.0f),
                           IM_COL32(130, 150, 170, 200), sub2);
 
-        const char* sub3 = "保证手机与电脑在同一 Wi-Fi 下，手机开启广播即可自动出画";
+        const char* sub3 = "支持 UDP 低延迟通道与 NDI 兼容模式";
         ImVec2 sub3Size = ImGui::CalcTextSize(sub3);
-        drawList->AddText(ImVec2(p0.x + (avail.x - sub3Size.x) * 0.5f, centerY + 98.0f),
+        drawList->AddText(ImVec2(p0.x + (avail.x - sub3Size.x) * 0.5f, centerY + 96.0f),
                           IM_COL32(0, 255, 128, 220), sub3);
     }
 }
@@ -320,26 +294,21 @@ void StreamingUI::RenderHudOverlay(const StreamConfig& config) {
 
     ImVec2 avail = ImGui::GetContentRegionAvail();
     ImVec2 screenPos = ImGui::GetWindowPos();
-    ImGui::SetNextWindowPos(ImVec2(screenPos.x + avail.x - 260.0f, screenPos.y + 20.0f), ImGuiCond_Always);
+    ImGui::SetNextWindowPos(ImVec2(screenPos.x + avail.x - 240.0f, screenPos.y + 20.0f), ImGuiCond_Always);
     ImGui::SetNextWindowBgAlpha(0.70f);
 
     ImGui::Begin("LatencyHUD", nullptr, hudFlags);
-    ImGui::TextColored(ImVec4(0.0f, 0.86f, 0.88f, 1.0f), "Castor NDI 极速串流");
+    ImGui::TextColored(ImVec4(0.0f, 0.86f, 0.88f, 1.0f), "Castor 投屏");
     ImGui::Separator();
     if (config.clientIp[0] != '\0') {
-        ImGui::Text("信号源: %s", config.clientIp);
+        ImGui::Text("设备: %s", config.clientIp);
     }
-    ImGui::Text("接收帧率(PC): %.1f FPS", config.currentFps);
-    if (config.hasPhoneStats) {
-        ImGui::Text("发送帧率(手机): %.1f FPS", config.phoneFps);
-    }
-    ImGui::TextColored(ImVec4(0.1f, 1.0f, 0.5f, 1.0f), "实测合计: %.2f ms", config.measuredSumMs);
-    ImGui::TextDisabled("  ├ 手机 发送: %.2f ms", config.phoneSendMs);
-    ImGui::TextDisabled("  └ PC 接->呈: %.2f ms",
-        config.pcRecvMs + config.pcUploadMs + config.pcDrawMs + config.pcPresentMs);
+    ImGui::Text("协议: %s", config.isH264Udp ? "UDP 低延迟" : "NDI 兼容");
+    ImGui::Text("帧率: %.1f FPS", config.currentFps);
     if (config.streamWidth > 0 && config.streamHeight > 0) {
-        ImGui::TextDisabled("规格: %d x %d", config.streamWidth, config.streamHeight);
+        ImGui::Text("规格: %d x %d", config.streamWidth, config.streamHeight);
     }
+    ImGui::Text("渲染: %.2f ms", config.renderMs);
     ImGui::End();
 }
 

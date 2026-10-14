@@ -10,6 +10,7 @@ import android.os.Build
 import android.os.Bundle
 import android.os.SystemClock
 import android.util.Log
+import android.view.Surface
 import java.net.DatagramPacket
 import java.net.DatagramSocket
 import java.net.InetAddress
@@ -23,6 +24,7 @@ import java.util.concurrent.atomic.AtomicBoolean
  * - MediaCodec Baseline / 0-Latency / CBR 硬件编码 (2~3ms)
  * - UDP 极速分片直推 (消除 TCP 队头阻塞，Wi-Fi 空中传输 0.5ms)
  * - 双向低延迟反馈 (自动响应 PC 端的 RTT PING 与 IDR 刷新请求)
+ * - 支持 GPU 零拷贝单 VirtualDisplay 分流 (中心 1:1 原画 + 外围低画质)
  */
 class H264UdpStreamer(
     private val mediaProjection: MediaProjection,
@@ -56,11 +58,13 @@ class H264UdpStreamer(
     private var udpSocket: DatagramSocket? = null
     private var pcAddress: InetAddress? = null
 
-    // 中心 1:1 原画独立硬件编码管线 (UDP 27192)
+    // 中心 1:1 原画独立硬件编码管线 (发往 UDP 27192)
     private var roiMediaCodec: MediaCodec? = null
-    private var roiVirtualDisplay: VirtualDisplay? = null
     private var roiWorkerThread: Thread? = null
     private var cachedRoiSpsPps: ByteArray? = null
+
+    // GPU 零拷贝分流器 (单 VirtualDisplay 避免 Android 14 安全崩溃)
+    private var gpuSplitter: GpuFrameSplitter? = null
 
     private var workerThread: Thread? = null
     private var echoThread: Thread? = null
@@ -115,9 +119,25 @@ class H264UdpStreamer(
             }
             mediaCodec?.setParameters(params)
             roiMediaCodec?.setParameters(params)
-            Log.d(TAG, "已触发硬件 IDR 关键帧即时刷新 (全景+原画)")
+            Log.d(TAG, "已触发硬件 IDR 关键帧即时刷新 (全景+中心原画)")
         } catch (e: Exception) {
             Log.w(TAG, "请求 IDR 失败: ${e.message}")
+        }
+    }
+
+    /**
+     * 动态调节画质码率 (实时生效，无需重启推流)
+     */
+    fun updateBitrate(newBitrateMbps: Int) {
+        val bps = (newBitrateMbps * 1000 * 1000).coerceIn(4_000_000, 45_000_000)
+        try {
+            val params = Bundle().apply {
+                putInt(MediaCodec.PARAMETER_KEY_VIDEO_BITRATE, bps)
+            }
+            mediaCodec?.setParameters(params)
+            Log.i(TAG, "已动态更新编码码率: ${newBitrateMbps} Mbps ($bps bps)")
+        } catch (e: Exception) {
+            Log.w(TAG, "动态更新码率失败: ${e.message}")
         }
     }
 
@@ -194,35 +214,36 @@ class H264UdpStreamer(
         val alignedW = ((width + 15) / 16) * 16
         val alignedH = ((height + 15) / 16) * 16
 
-        Log.i(TAG, "正在创建背景 MediaCodec 编码器: ${alignedW}x${alignedH} @ ${bitrateMbps}Mbps CBR, ${fps}FPS")
+        Log.i(TAG, "正在创建背景 MediaCodec 硬件编码器: ${alignedW}x${alignedH} @ ${bitrateMbps}Mbps CBR, ${fps}FPS")
         mediaCodec = createEncoder(alignedW, alignedH, bitrateMbps * 1000 * 1000)
-        val inputSurface = mediaCodec!!.createInputSurface()
+        val fullInputSurface = mediaCodec!!.createInputSurface()
         mediaCodec!!.start()
 
-        virtualDisplay = mediaProjection.createVirtualDisplay(
-            "CastorH264Bg",
-            alignedW, alignedH, densityDpi,
-            DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
-            inputSurface, null, null
-        )
+        val alignedRoi = if (centerRoiSize > 0) (((centerRoiSize + 15) / 16) * 16).coerceIn(100, 1000) else 0
+        var roiInputSurface: Surface? = null
 
-        // 若启用了中心原画 (centerRoiSize > 0)，配置独立的 1:1 高清编码通道 (发往 targetPort + 2 = 27192)
-        if (centerRoiSize > 0) {
-            val alignedRoi = (((centerRoiSize + 15) / 16) * 16).coerceIn(100, 1000)
-            val roiBitrate = 14 * 1000 * 1000 // 14Mbps 高码率 CBR 确保 YOLO 输入与中心点对点锐利度
-            Log.i(TAG, "正在启动中心 1:1 原画独立硬件编码器: ${alignedRoi}x${alignedRoi} @ 14Mbps CBR, ${fps}FPS")
-            roiMediaCodec = createEncoder(alignedRoi, alignedRoi, roiBitrate)
-            val roiInputSurface = roiMediaCodec!!.createInputSurface()
+        if (alignedRoi > 0) {
+            val roiBps = 18 * 1000 * 1000 // 18 Mbps 超高码率密度，保证 640x640 晶莹剔透无压缩伪影
+            Log.i(TAG, "正在创建中心 1:1 原画 MediaCodec 硬件编码器: ${alignedRoi}x${alignedRoi} @ 18Mbps CBR, ${fps}FPS")
+            roiMediaCodec = createEncoder(alignedRoi, alignedRoi, roiBps)
+            roiInputSurface = roiMediaCodec!!.createInputSurface()
             roiMediaCodec!!.start()
+        }
 
-            roiVirtualDisplay = mediaProjection.createVirtualDisplay(
-                "CastorH264Roi",
-                alignedRoi, alignedRoi, densityDpi,
-                DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
-                roiInputSurface, null, null
+        val virtualDisplaySurface: Surface
+        if (alignedRoi > 0 && roiInputSurface != null) {
+            // 核心技术突破：使用 GPU 零拷贝单 VirtualDisplay 分流器
+            gpuSplitter = GpuFrameSplitter(
+                fullSurface = fullInputSurface,
+                fullWidth = alignedW,
+                fullHeight = alignedH,
+                roiSurface = roiInputSurface,
+                roiWidth = alignedRoi,
+                roiHeight = alignedRoi
             )
+            virtualDisplaySurface = gpuSplitter!!.start()
 
-            // 启动中心原画独立轮询推流线程
+            // 启动中心 1:1 原画独立轮询推流线程 (发往 targetPort + 2 = 27192)
             roiWorkerThread = Thread({
                 android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_URGENT_DISPLAY)
                 try {
@@ -234,10 +255,20 @@ class H264UdpStreamer(
                 isDaemon = true
                 start()
             }
+        } else {
+            virtualDisplaySurface = fullInputSurface
         }
 
-        Log.i(TAG, "MediaCodec 硬件编码器与 VirtualDisplay 已就绪: ${alignedW}x${alignedH} @ ${fps}FPS (原画: $centerRoiSize)")
-        onStatusChanged?.invoke(true, if (centerRoiSize > 0) "投屏推流中: 全景+${centerRoiSize}p中心原画 @ ${fps}FPS" else "投屏推流中: ${alignedW}x${alignedH} @ ${fps}FPS")
+        // 无论是否启用中心原画，均严格只调用一次 createVirtualDisplay (杜绝 Android 14 崩溃)
+        virtualDisplay = mediaProjection.createVirtualDisplay(
+            "CastorH264Stream",
+            alignedW, alignedH, densityDpi,
+            DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
+            virtualDisplaySurface, null, null
+        )
+
+        Log.i(TAG, "GPU 硬件分流器与 MediaCodec 编码器已就绪: 背景 ${alignedW}x${alignedH}, 中心原画 $alignedRoi")
+        onStatusChanged?.invoke(true, if (alignedRoi > 0) "投屏推流中: 全景+${alignedRoi}p中心原画 @ ${fps}FPS" else "投屏推流中: ${alignedW}x${alignedH} @ ${fps}FPS")
     }
 
     private fun MediaFormat.setIntegerSafe(key: String, value: Int) {
@@ -428,10 +459,11 @@ class H264UdpStreamer(
     fun stop() {
         if (!isStreaming.getAndSet(false)) return
 
-        try { roiVirtualDisplay?.release() } catch (_: Exception) {}
-        roiVirtualDisplay = null
         try { virtualDisplay?.release() } catch (_: Exception) {}
         virtualDisplay = null
+
+        try { gpuSplitter?.release() } catch (_: Exception) {}
+        gpuSplitter = null
 
         try {
             roiMediaCodec?.stop()
