@@ -114,21 +114,25 @@ class ScreenCaptureService : Service() {
         }
 
         if (resultCode == Activity.RESULT_OK && resultData != null) {
-            try {
-                val projectionManager = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
-                mediaProjection?.stop()
-                val projection = projectionManager.getMediaProjection(resultCode, resultData)
-                if (projection != null) {
-                    projection.registerCallback(projectionCallback, mainHandler)
-                    mediaProjection = projection
-                    Log.d(TAG, "MediaProjection 初始化成功")
-                }
-            } catch (e: Exception) {
-                Log.e(TAG, "创建 MediaProjection 失败: ${e.message}", e)
-            }
+            setProjectionData(resultCode, resultData)
         }
 
         return START_NOT_STICKY
+    }
+
+    fun setProjectionData(resultCode: Int, resultData: Intent) {
+        try {
+            val projectionManager = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
+            mediaProjection?.stop()
+            val projection = projectionManager.getMediaProjection(resultCode, resultData)
+            if (projection != null) {
+                projection.registerCallback(projectionCallback, mainHandler)
+                mediaProjection = projection
+                Log.d(TAG, "MediaProjection 初始化成功")
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "创建 MediaProjection 失败: ${e.message}", e)
+        }
     }
 
     fun startStreaming(
@@ -207,11 +211,6 @@ class ScreenCaptureService : Service() {
         this.currentDensityDpi = densityDpi
         this.targetFps = fps
 
-        var retryCount = 0
-        while (mediaProjection == null && retryCount < 10) {
-            try { Thread.sleep(50) } catch (_: Exception) {}
-            retryCount++
-        }
         val projection = mediaProjection ?: run {
             onStatusChanged(false, "错误: 未获取到屏幕截取实例")
             return
@@ -260,11 +259,6 @@ class ScreenCaptureService : Service() {
         this.udpTargetPort = targetPort
         this.udpBitrateMbps = bitrateMbps
 
-        var retryCount = 0
-        while (mediaProjection == null && retryCount < 10) {
-            try { Thread.sleep(50) } catch (_: Exception) {}
-            retryCount++
-        }
         val projection = mediaProjection ?: run {
             onStatusChanged(false, "错误: 未获取到屏幕截取实例")
             return

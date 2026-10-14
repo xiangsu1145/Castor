@@ -75,10 +75,15 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private var pendingProjectionCode: Int? = null
+    private var pendingProjectionData: Intent? = null
+
     private val projectionLauncher = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult()
     ) { result ->
         if (result.resultCode == Activity.RESULT_OK && result.data != null) {
+            pendingProjectionCode = result.resultCode
+            pendingProjectionData = result.data
             val serviceIntent = Intent(this, ScreenCaptureService::class.java).apply {
                 putExtra("resultCode", result.resultCode)
                 putExtra("resultData", result.data)
@@ -88,7 +93,12 @@ class MainActivity : AppCompatActivity() {
             } else {
                 startService(serviceIntent)
             }
-            bindService(serviceIntent, serviceConnection, Context.BIND_AUTO_CREATE)
+            if (captureService != null && isBound) {
+                captureService?.setProjectionData(result.resultCode, result.data!!)
+                startActiveStream()
+            } else {
+                bindService(serviceIntent, serviceConnection, Context.BIND_AUTO_CREATE)
+            }
         } else {
             showSnackbar("用户取消或未授予截屏权限")
             updateUiState(false)
@@ -98,8 +108,12 @@ class MainActivity : AppCompatActivity() {
     private val serviceConnection = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName?, service: IBinder?) {
             val binder = service as ScreenCaptureService.LocalBinder
-            captureService = binder.getService()
+            val svc = binder.getService()
+            captureService = svc
             isBound = true
+            if (pendingProjectionCode != null && pendingProjectionData != null) {
+                svc.setProjectionData(pendingProjectionCode!!, pendingProjectionData!!)
+            }
             startActiveStream()
         }
 
