@@ -6,6 +6,118 @@
 
 namespace CastorUI {
 
+// 自定义数值步进调节控件：Title 输入框 [-] [+]
+// 中括号为正方形按钮，输入框显示数值并支持直接打字，回车确认后超出范围自动截断为最大/最小值
+static bool StepInputFloat(const char* label, float* value, float minVal, float maxVal, float step = 0.05f, const char* format = "%.2f") {
+    bool changed = false;
+    ImGui::PushID(label);
+
+    float btnSize = ImGui::GetFrameHeight();
+    float spacing = ImGui::GetStyle().ItemSpacing.x;
+    float inputW = 68.0f;
+    float controlsW = inputW + spacing + btnSize + spacing + btnSize;
+
+    // 1. Title 标签 (垂直居中对齐)
+    ImGui::AlignTextToFramePadding();
+    ImGui::TextUnformatted(label);
+
+    ImGui::SameLine();
+
+    // 靠右整齐对齐
+    float curX = ImGui::GetCursorPosX();
+    float targetX = ImGui::GetWindowContentRegionMin().x + ImGui::GetWindowSize().x - controlsW - ImGui::GetStyle().WindowPadding.x;
+    if (targetX > curX) {
+        ImGui::SetCursorPosX(targetX);
+    }
+
+    // 2. 输入框 (纯输入框无自带加减号，回车或失焦确认并进行 clamp 截断)
+    ImGui::SetNextItemWidth(inputW);
+    if (ImGui::InputFloat("##Val", value, 0.0f, 0.0f, format, ImGuiInputTextFlags_EnterReturnsTrue)) {
+        if (*value > maxVal) *value = maxVal;
+        if (*value < minVal) *value = minVal;
+        *value = std::round(*value * 100.0f) / 100.0f;
+        changed = true;
+    } else if (ImGui::IsItemDeactivatedAfterEdit()) {
+        if (*value > maxVal) *value = maxVal;
+        if (*value < minVal) *value = minVal;
+        *value = std::round(*value * 100.0f) / 100.0f;
+        changed = true;
+    }
+
+    // 3. [-] 正方形按钮
+    ImGui::SameLine();
+    if (ImGui::Button("-", ImVec2(btnSize, btnSize))) {
+        *value -= step;
+        if (*value < minVal) *value = minVal;
+        if (*value > maxVal) *value = maxVal;
+        *value = std::round(*value * 100.0f) / 100.0f;
+        changed = true;
+    }
+
+    // 4. [+] 正方形按钮
+    ImGui::SameLine();
+    if (ImGui::Button("+", ImVec2(btnSize, btnSize))) {
+        *value += step;
+        if (*value > maxVal) *value = maxVal;
+        if (*value < minVal) *value = minVal;
+        *value = std::round(*value * 100.0f) / 100.0f;
+        changed = true;
+    }
+
+    ImGui::PopID();
+    return changed;
+}
+
+static bool StepInputInt(const char* label, int* value, int minVal, int maxVal, int step = 5) {
+    bool changed = false;
+    ImGui::PushID(label);
+
+    float btnSize = ImGui::GetFrameHeight();
+    float spacing = ImGui::GetStyle().ItemSpacing.x;
+    float inputW = 68.0f;
+    float controlsW = inputW + spacing + btnSize + spacing + btnSize;
+
+    ImGui::AlignTextToFramePadding();
+    ImGui::TextUnformatted(label);
+
+    ImGui::SameLine();
+    float curX = ImGui::GetCursorPosX();
+    float targetX = ImGui::GetWindowContentRegionMin().x + ImGui::GetWindowSize().x - controlsW - ImGui::GetStyle().WindowPadding.x;
+    if (targetX > curX) {
+        ImGui::SetCursorPosX(targetX);
+    }
+
+    ImGui::SetNextItemWidth(inputW);
+    if (ImGui::InputInt("##Val", value, 0, 0, ImGuiInputTextFlags_EnterReturnsTrue)) {
+        if (*value > maxVal) *value = maxVal;
+        if (*value < minVal) *value = minVal;
+        changed = true;
+    } else if (ImGui::IsItemDeactivatedAfterEdit()) {
+        if (*value > maxVal) *value = maxVal;
+        if (*value < minVal) *value = minVal;
+        changed = true;
+    }
+
+    ImGui::SameLine();
+    if (ImGui::Button("-", ImVec2(btnSize, btnSize))) {
+        *value -= step;
+        if (*value < minVal) *value = minVal;
+        if (*value > maxVal) *value = maxVal;
+        changed = true;
+    }
+
+    ImGui::SameLine();
+    if (ImGui::Button("+", ImVec2(btnSize, btnSize))) {
+        *value += step;
+        if (*value > maxVal) *value = maxVal;
+        if (*value < minVal) *value = minVal;
+        changed = true;
+    }
+
+    ImGui::PopID();
+    return changed;
+}
+
 StreamingUI::StreamingUI() {
 }
 
@@ -184,7 +296,7 @@ void StreamingUI::RenderSidebar(StreamConfig& config) {
         ImGui::Checkbox("高亮屏幕中心区域", &config.enableCenterRoiOnly);
 
         if (config.enableCenterRoiOnly) {
-            ImGui::SliderInt("高亮区域大小 (%)", &config.roiPercent, 20, 80);
+            StepInputInt("高亮区域大小 (%)", &config.roiPercent, 10, 90, 5);
         }
         ImGui::Spacing();
     }
@@ -362,8 +474,8 @@ void StreamingUI::RenderModelManagementSection() {
             ImGui::TextDisabled("缓存路径: %s", activeModel->relativePath.c_str());
 
             ImGui::Spacing();
-            // 全局总 NMS (默认 0.45)
-            if (ImGui::SliderFloat("总 NMS 阈值", &activeModel->globalNms, 0.10f, 0.95f, "%.2f")) {
+            // 全局总 NMS (默认 0.45, 范围 0.05 ~ 0.95, 步长 0.05)
+            if (StepInputFloat("总 NMS 阈值", &activeModel->globalNms, 0.05f, 0.95f, 0.05f, "%.2f")) {
                 mgr.SaveModels();
             }
 
@@ -397,11 +509,12 @@ void StreamingUI::RenderModelManagementSection() {
 
                 auto& curClass = activeModel->classes[s_selectedClassIdx];
                 ImGui::Spacing();
-                // 类别专属置信度与 IOU 设置 (默认 0.50)
-                if (ImGui::SliderFloat("类别置信度 (Conf)", &curClass.conf, 0.05f, 0.95f, "%.2f")) {
+                // 类别专属置信度与 IOU 设置 (默认 0.50, 范围 0.01 ~ 0.99, 步长 0.05)
+                if (StepInputFloat("类别置信度 (Conf)", &curClass.conf, 0.01f, 0.99f, 0.05f, "%.2f")) {
                     mgr.SaveModels();
                 }
-                if (ImGui::SliderFloat("类别交并比 (IOU)", &curClass.iou, 0.05f, 0.95f, "%.2f")) {
+                ImGui::Spacing();
+                if (StepInputFloat("类别交并比 (IOU)", &curClass.iou, 0.01f, 0.99f, 0.05f, "%.2f")) {
                     mgr.SaveModels();
                 }
 
