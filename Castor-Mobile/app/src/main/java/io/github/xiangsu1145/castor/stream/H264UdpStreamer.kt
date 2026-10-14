@@ -32,7 +32,8 @@ class H264UdpStreamer(
     private val height: Int = 1528,
     private val fps: Int = 60,
     private val bitrateMbps: Int = 18,
-    private val densityDpi: Int = 400
+    private val densityDpi: Int = 400,
+    private val centerRoiSize: Int = 0
 ) {
     companion object {
         private const val TAG = "H264UdpStreamer"
@@ -54,6 +55,12 @@ class H264UdpStreamer(
     private var virtualDisplay: VirtualDisplay? = null
     private var udpSocket: DatagramSocket? = null
     private var pcAddress: InetAddress? = null
+
+    // 中心 1:1 原画独立硬件编码管线 (UDP 27192)
+    private var roiMediaCodec: MediaCodec? = null
+    private var roiVirtualDisplay: VirtualDisplay? = null
+    private var roiWorkerThread: Thread? = null
+    private var cachedRoiSpsPps: ByteArray? = null
 
     private var workerThread: Thread? = null
     private var echoThread: Thread? = null
@@ -107,7 +114,8 @@ class H264UdpStreamer(
                 putInt(MediaCodec.PARAMETER_KEY_REQUEST_SYNC_FRAME, 0)
             }
             mediaCodec?.setParameters(params)
-            Log.d(TAG, "已触发硬件 IDR 关键帧即时刷新")
+            roiMediaCodec?.setParameters(params)
+            Log.d(TAG, "已触发硬件 IDR 关键帧即时刷新 (全景+原画)")
         } catch (e: Exception) {
             Log.w(TAG, "请求 IDR 失败: ${e.message}")
         }
@@ -143,14 +151,10 @@ class H264UdpStreamer(
         }
     }
 
-    private fun setupCodecAndVirtualDisplay() {
-        // 宽高按 16 字节对齐
-        val alignedW = ((width + 15) / 16) * 16
-        val alignedH = ((height + 15) / 16) * 16
-
-        val format = MediaFormat.createVideoFormat(MIME_TYPE, alignedW, alignedH).apply {
+    private fun createEncoder(w: Int, h: Int, bps: Int): MediaCodec {
+        val format = MediaFormat.createVideoFormat(MIME_TYPE, w, h).apply {
             setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
-            setInteger(MediaFormat.KEY_BIT_RATE, bitrateMbps * 1000 * 1000)
+            setInteger(MediaFormat.KEY_BIT_RATE, bps)
             setInteger(MediaFormat.KEY_FRAME_RATE, fps)
             setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 3) // 3 秒刷新关键帧，避免频繁大帧打爆 Wi-Fi
             setInteger(MediaFormat.KEY_BITRATE_MODE, MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR)
@@ -177,27 +181,63 @@ class H264UdpStreamer(
             setIntegerSafe("low-latency", 1)
             setIntegerSafe("latency", 0)
             setIntegerSafe("priority", 0)
-            setIntegerSafe("max-bitrate", bitrateMbps * 1000 * 1000)
+            setIntegerSafe("max-bitrate", bps)
             setIntegerSafe("prepend-sps-pps-to-idr-frames", 1)
         }
-
-        Log.i(TAG, "正在创建 MediaCodec 编码器并配置格式: ${alignedW}x${alignedH} @ ${bitrateMbps}Mbps CBR, 目标帧率: ${fps}FPS")
-        mediaCodec = MediaCodec.createEncoderByType(MIME_TYPE).apply {
+        return MediaCodec.createEncoderByType(MIME_TYPE).apply {
             configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
         }
+    }
 
+    private fun setupCodecAndVirtualDisplay() {
+        // 宽高按 16 字节对齐
+        val alignedW = ((width + 15) / 16) * 16
+        val alignedH = ((height + 15) / 16) * 16
+
+        Log.i(TAG, "正在创建背景 MediaCodec 编码器: ${alignedW}x${alignedH} @ ${bitrateMbps}Mbps CBR, ${fps}FPS")
+        mediaCodec = createEncoder(alignedW, alignedH, bitrateMbps * 1000 * 1000)
         val inputSurface = mediaCodec!!.createInputSurface()
         mediaCodec!!.start()
 
         virtualDisplay = mediaProjection.createVirtualDisplay(
-            "CastorH264Stream",
+            "CastorH264Bg",
             alignedW, alignedH, densityDpi,
             DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
             inputSurface, null, null
         )
 
-        Log.i(TAG, "MediaCodec 硬件编码器与 VirtualDisplay 已就绪: ${alignedW}x${alignedH} @ ${fps}FPS")
-        onStatusChanged?.invoke(true, "投屏推流中: ${alignedW}x${alignedH} @ ${fps}FPS")
+        // 若启用了中心原画 (centerRoiSize > 0)，配置独立的 1:1 高清编码通道 (发往 targetPort + 2 = 27192)
+        if (centerRoiSize > 0) {
+            val alignedRoi = (((centerRoiSize + 15) / 16) * 16).coerceIn(100, 1000)
+            val roiBitrate = 14 * 1000 * 1000 // 14Mbps 高码率 CBR 确保 YOLO 输入与中心点对点锐利度
+            Log.i(TAG, "正在启动中心 1:1 原画独立硬件编码器: ${alignedRoi}x${alignedRoi} @ 14Mbps CBR, ${fps}FPS")
+            roiMediaCodec = createEncoder(alignedRoi, alignedRoi, roiBitrate)
+            val roiInputSurface = roiMediaCodec!!.createInputSurface()
+            roiMediaCodec!!.start()
+
+            roiVirtualDisplay = mediaProjection.createVirtualDisplay(
+                "CastorH264Roi",
+                alignedRoi, alignedRoi, densityDpi,
+                DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
+                roiInputSurface, null, null
+            )
+
+            // 启动中心原画独立轮询推流线程
+            roiWorkerThread = Thread({
+                android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_URGENT_DISPLAY)
+                try {
+                    drainRoiEncoder(alignedRoi, alignedRoi)
+                } catch (e: Exception) {
+                    Log.w(TAG, "中心原画推流线程退出: ${e.message}")
+                }
+            }, "CastorH264RoiStreamer").apply {
+                isDaemon = true
+                start()
+            }
+        }
+
+        Log.i(TAG, "MediaCodec 硬件编码器与 VirtualDisplay 已就绪: ${alignedW}x${alignedH} @ ${fps}FPS (原画: $centerRoiSize)")
+        onStatusChanged?.invoke(true, if (centerRoiSize > 0) "投屏推流中: 全景+${centerRoiSize}p中心原画 @ ${fps}FPS" else "投屏推流中: ${alignedW}x${alignedH} @ ${fps}FPS")
     }
 
     private fun MediaFormat.setIntegerSafe(key: String, value: Int) {
@@ -311,11 +351,93 @@ class H264UdpStreamer(
         }
     }
 
+    private fun drainRoiEncoder(roiW: Int, roiH: Int) {
+        val bufferInfo = MediaCodec.BufferInfo()
+        var roiFrameSeq = 0
+
+        val socket = udpSocket ?: return
+        val addr = pcAddress ?: return
+        val roiPort = targetPort + 2 // 目标端口 27192
+
+        val sendPacketBuf = ByteArray(HEADER_SIZE + FRAG_PAYLOAD)
+        val sendHeaderBb = ByteBuffer.wrap(sendPacketBuf).order(ByteOrder.LITTLE_ENDIAN)
+        val packet = DatagramPacket(sendPacketBuf, sendPacketBuf.size, addr, roiPort)
+
+        Log.i(TAG, "drainRoiEncoder 启动成功，正在轮询中心 1:1 原画输出 (${roiW}x${roiH} -> $roiPort)...")
+
+        while (isStreaming.get()) {
+            val outputBufferIndex = roiMediaCodec?.dequeueOutputBuffer(bufferInfo, 10000) ?: -1
+            if (outputBufferIndex >= 0) {
+                val outputBuffer = roiMediaCodec?.getOutputBuffer(outputBufferIndex)
+                if (outputBuffer != null && bufferInfo.size > 0) {
+                    outputBuffer.position(bufferInfo.offset)
+                    outputBuffer.limit(bufferInfo.offset + bufferInfo.size)
+
+                    val payloadBytes = ByteArray(bufferInfo.size)
+                    outputBuffer.get(payloadBytes)
+
+                    val isConfig = (bufferInfo.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG) != 0
+                    val isKeyFrame = (bufferInfo.flags and MediaCodec.BUFFER_FLAG_KEY_FRAME) != 0
+
+                    if (isConfig) {
+                        cachedRoiSpsPps = payloadBytes
+                    }
+
+                    val finalFrameData = if (isKeyFrame && cachedRoiSpsPps != null && !isConfig) {
+                        val merged = ByteArray(cachedRoiSpsPps!!.size + payloadBytes.size)
+                        System.arraycopy(cachedRoiSpsPps!!, 0, merged, 0, cachedRoiSpsPps!!.size)
+                        System.arraycopy(payloadBytes, 0, merged, cachedRoiSpsPps!!.size, payloadBytes.size)
+                        merged
+                    } else {
+                        payloadBytes
+                    }
+
+                    val ptsUs = SystemClock.elapsedRealtimeNanos() / 1000L
+                    var flags = 0
+                    if (isKeyFrame) flags = flags or 0x01
+                    if (isConfig) flags = flags or 0x02
+
+                    val frameLen = finalFrameData.size
+                    val fragCount = (frameLen + FRAG_PAYLOAD - 1) / FRAG_PAYLOAD
+
+                    for (i in 0 until fragCount) {
+                        val off = i * FRAG_PAYLOAD
+                        val len = minOf(FRAG_PAYLOAD, frameLen - off)
+
+                        sendHeaderBb.clear()
+                        sendHeaderBb.putInt(MAGIC_H264)
+                        sendHeaderBb.putInt(roiFrameSeq)
+                        sendHeaderBb.putShort(i.toShort())
+                        sendHeaderBb.putShort(fragCount.toShort())
+                        sendHeaderBb.putShort(len.toShort())
+                        sendHeaderBb.putShort(flags.toShort())
+                        sendHeaderBb.putLong(ptsUs)
+
+                        System.arraycopy(finalFrameData, off, sendPacketBuf, HEADER_SIZE, len)
+                        packet.length = HEADER_SIZE + len
+                        socket.send(packet)
+                    }
+
+                    roiFrameSeq++
+                }
+                roiMediaCodec?.releaseOutputBuffer(outputBufferIndex, false)
+            }
+        }
+    }
+
     fun stop() {
         if (!isStreaming.getAndSet(false)) return
 
+        try { roiVirtualDisplay?.release() } catch (_: Exception) {}
+        roiVirtualDisplay = null
         try { virtualDisplay?.release() } catch (_: Exception) {}
         virtualDisplay = null
+
+        try {
+            roiMediaCodec?.stop()
+            roiMediaCodec?.release()
+        } catch (_: Exception) {}
+        roiMediaCodec = null
 
         try {
             mediaCodec?.stop()
@@ -326,6 +448,8 @@ class H264UdpStreamer(
         try { udpSocket?.close() } catch (_: Exception) {}
         udpSocket = null
 
+        try { roiWorkerThread?.interrupt() } catch (_: Exception) {}
+        roiWorkerThread = null
         try { workerThread?.interrupt() } catch (_: Exception) {}
         workerThread = null
         try { echoThread?.interrupt() } catch (_: Exception) {}

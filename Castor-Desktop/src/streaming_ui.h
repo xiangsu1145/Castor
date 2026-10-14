@@ -55,6 +55,14 @@ struct StreamConfig {
     bool isH264Udp = false;
     float h264UdpMbps = 0.0f;
 
+    // 中心原画 (Picture-in-Picture / ROI) 状态
+    bool hasRoiStream = false;
+    int roiWidth = 0;
+    int roiHeight = 0;
+    float roiFps = 0.0f;
+    float roiMbps = 0.0f;
+    bool showRoiBoundary = true; // 是否在中心原画四周显示微弱对齐框
+
     // 画面与辅助功能设置
     bool showCrosshair = false;
     bool enableCenterRoiOnly = false;
@@ -72,11 +80,13 @@ class StreamingUI {
 public:
     StreamingUI();
     void Render(StreamConfig& config, float screenWidth, float screenHeight,
-                void* videoTextureSrv = nullptr, int videoW = 0, int videoH = 0);
+                void* videoTextureSrv = nullptr, int videoW = 0, int videoH = 0,
+                void* roiTextureSrv = nullptr, int roiW = 0, int roiH = 0);
 
 private:
     void RenderSidebar(StreamConfig& config);
-    void RenderMainView(StreamConfig& config, void* videoTextureSrv, int videoW, int videoH);
+    void RenderMainView(StreamConfig& config, void* videoTextureSrv, int videoW, int videoH,
+                        void* roiTextureSrv = nullptr, int roiW = 0, int roiH = 0);
     void RenderHudOverlay(const StreamConfig& config);
 };
 

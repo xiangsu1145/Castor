@@ -59,6 +59,8 @@ class MainActivity : AppCompatActivity() {
     private var pcIp: String? = null    // 自动发现的 PC IP
     private var lanDiscovery: LanDiscovery? = null
     private var ndiNameLayout: TextInputLayout? = null
+    private var centerRoiSize = 640     // 屏幕中心原画分辨率 (100~1000)
+    private var roiSliderLayout: LinearLayout? = null
 
     // 真实屏幕尺寸：走 DisplayManager 的默认显示，跟随系统旋转（不受本 Activity 竖屏锁定影响）。
     private fun getScreenMetrics(): Pair<Int, Int> {
@@ -261,6 +263,7 @@ class MainActivity : AppCompatActivity() {
                 setOnClickListener {
                     useUdp = true
                     ndiNameLayout?.visibility = View.GONE
+                    roiSliderLayout?.visibility = View.VISIBLE
                     statusTextView.text = if (pcIp.isNullOrEmpty()) "已切换到 UDP 模式，正在搜索电脑..." else "已选择 UDP 模式 (电脑: $pcIp)"
                     if (!isStreamingActive) actionButton.text = "启动无线投屏"
                 }
@@ -271,6 +274,7 @@ class MainActivity : AppCompatActivity() {
                 setOnClickListener {
                     useUdp = false
                     ndiNameLayout?.visibility = View.VISIBLE
+                    roiSliderLayout?.visibility = View.GONE
                     statusTextView.text = "已切换到 NDI 模式"
                     if (!isStreamingActive) actionButton.text = "启动 NDI 广播"
                 }
@@ -441,6 +445,47 @@ class MainActivity : AppCompatActivity() {
             }
             inner.addView(fpsLayout)
 
+            // 屏幕中心原画分辨率滑动条（仅在 UDP 模式下展示）
+            val roiContainer = LinearLayout(context).apply {
+                orientation = LinearLayout.VERTICAL
+                layoutParams = LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT
+                ).apply { setMargins(0, dpToPx(14), 0, 0) }
+                visibility = if (useUdp) View.VISIBLE else View.GONE
+            }
+            roiSliderLayout = roiContainer
+
+            val roiTitle = MaterialTextView(context).apply {
+                text = "屏幕中心原画分辨率: ${centerRoiSize}x${centerRoiSize}"
+                setTextAppearance(com.google.android.material.R.style.TextAppearance_Material3_BodyMedium)
+                setTextColor(MaterialColors.getColor(this, com.google.android.material.R.attr.colorOnSurface))
+                setPadding(0, 0, 0, dpToPx(4))
+            }
+            roiContainer.addView(roiTitle)
+
+            val roiSlider = com.google.android.material.slider.Slider(context).apply {
+                valueFrom = 100f
+                valueTo = 1000f
+                stepSize = 10f
+                value = centerRoiSize.toFloat()
+                addOnChangeListener { _, value, _ ->
+                    centerRoiSize = ((value.toInt() + 8) / 16) * 16
+                    roiTitle.text = "屏幕中心原画分辨率: ${centerRoiSize}x${centerRoiSize}"
+                }
+            }
+            roiContainer.addView(roiSlider)
+
+            val roiHint = MaterialTextView(context).apply {
+                text = "中心画面 1:1 无损原生采集，电脑端用于画中画高清映射与 YOLO 推理"
+                setTextAppearance(com.google.android.material.R.style.TextAppearance_Material3_BodySmall)
+                setTextColor(MaterialColors.getColor(this, com.google.android.material.R.attr.colorOutline))
+                setPadding(0, dpToPx(2), 0, 0)
+            }
+            roiContainer.addView(roiHint)
+
+            inner.addView(roiContainer)
+
             addView(inner)
         }
     }
@@ -520,6 +565,7 @@ class MainActivity : AppCompatActivity() {
                 fps = targetFps,
                 bitrateMbps = 20,
                 densityDpi = density,
+                centerRoiSize = centerRoiSize,
                 onStatusChanged = { running, msg ->
                     runOnUiThread { updateUiState(running); statusTextView.text = msg }
                 },

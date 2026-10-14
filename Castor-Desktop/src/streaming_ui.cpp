@@ -9,7 +9,8 @@ StreamingUI::StreamingUI() {
 }
 
 void StreamingUI::Render(StreamConfig& config, float screenWidth, float screenHeight,
-                         void* videoTextureSrv, int videoW, int videoH) {
+                         void* videoTextureSrv, int videoW, int videoH,
+                         void* roiTextureSrv, int roiW, int roiH) {
     if (config.isConnected && config.currentFps > 0.1f) {
         config.fpsHistory.push_back(config.currentFps);
         if (config.fpsHistory.size() > 120) {
@@ -41,7 +42,7 @@ void StreamingUI::Render(StreamConfig& config, float screenWidth, float screenHe
 
     // 右侧投屏画面区域
     ImGui::BeginChild("ScreenDisplayArea", ImVec2(0, 0), true);
-    RenderMainView(config, videoTextureSrv, videoW, videoH);
+    RenderMainView(config, videoTextureSrv, videoW, videoH, roiTextureSrv, roiW, roiH);
     if (config.showHud) {
         RenderHudOverlay(config);
     }
@@ -152,6 +153,14 @@ void StreamingUI::RenderSidebar(StreamConfig& config) {
                                  static_cast<int>(config.fpsHistory.size()),
                                  0, overlay, 0.0f, 144.0f, ImVec2(-1, 65));
             }
+
+            if (config.hasRoiStream) {
+                ImGui::Separator();
+                ImGui::TextColored(ImVec4(0.0f, 0.86f, 0.88f, 1.0f), "● 屏幕中心 1:1 原画流");
+                ImGui::Text("  原画规格: %dx%d (点对点无损)", config.roiWidth, config.roiHeight);
+                ImGui::Text("  原画帧率: %.1f FPS | 带宽: %.1f Mbps", config.roiFps, config.roiMbps);
+                ImGui::Checkbox("显示中心原画定位框", &config.showRoiBoundary);
+            }
         } else {
             ImGui::TextDisabled("NDI 帧率: -- FPS (未推流)");
         }
@@ -207,7 +216,8 @@ void StreamingUI::RenderSidebar(StreamConfig& config) {
     ImGui::TextDisabled("技术栈: NDI 6 + DirectX 11 | 广播级超低延迟架构");
 }
 
-void StreamingUI::RenderMainView(StreamConfig& config, void* videoTextureSrv, int videoW, int videoH) {
+void StreamingUI::RenderMainView(StreamConfig& config, void* videoTextureSrv, int videoW, int videoH,
+                                 void* roiTextureSrv, int roiW, int roiH) {
     ImVec2 avail = ImGui::GetContentRegionAvail();
     ImVec2 p0 = ImGui::GetCursorScreenPos();
     ImVec2 p1 = ImVec2(p0.x + avail.x, p0.y + avail.y);
@@ -232,6 +242,24 @@ void StreamingUI::RenderMainView(StreamConfig& config, void* videoTextureSrv, in
         ImGui::Image(reinterpret_cast<ImTextureID>(videoTextureSrv), ImVec2(dispW, dispH));
 
         ImVec2 center = ImVec2(p0.x + avail.x * 0.5f, p0.y + avail.y * 0.5f);
+
+        // 中心原画 (Picture-in-Picture) 居中 1:1 物理比例覆盖渲染
+        if (roiTextureSrv != nullptr && roiW > 0 && roiH > 0) {
+            float roiDispW = dispW * (static_cast<float>(roiW) / static_cast<float>(videoW));
+            float roiDispH = dispH * (static_cast<float>(roiH) / static_cast<float>(videoH));
+            ImVec2 roiPos = ImVec2(center.x - roiDispW * 0.5f, center.y - roiDispH * 0.5f);
+            ImVec2 roiEnd = ImVec2(roiPos.x + roiDispW, roiPos.y + roiDispH);
+
+            drawList->AddImage(
+                reinterpret_cast<ImTextureID>(roiTextureSrv),
+                roiPos, roiEnd
+            );
+
+            if (config.showRoiBoundary) {
+                drawList->AddRect(roiPos, roiEnd, IM_COL32(0, 210, 211, 180), 0.0f, 0, 1.2f);
+                drawList->AddText(ImVec2(roiPos.x + 6, roiPos.y + 6), IM_COL32(0, 210, 211, 220), "[中心原画 1:1]");
+            }
+        }
 
         // 可选：中心区域高亮框
         if (config.enableCenterRoiOnly) {

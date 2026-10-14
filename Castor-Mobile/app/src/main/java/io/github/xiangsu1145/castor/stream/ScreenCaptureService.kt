@@ -41,6 +41,7 @@ class ScreenCaptureService : Service() {
     private var currentStreamName: String = "Castor-Android-Phone"
     private var currentWidth: Int = 1080
     private var currentHeight: Int = 1920
+    private var currentCenterRoiSize: Int = 640
 
     private var statusCallback: ((Boolean, String) -> Unit)? = null
     private var statsCallback: ((Float, Float) -> Unit)? = null
@@ -75,7 +76,7 @@ class ScreenCaptureService : Service() {
         if (udpStreamer != null && !ip.isNullOrEmpty()) {
             startUdpStream(
                 ip, udpTargetPort, currentWidth, currentHeight,
-                targetFps, udpBitrateMbps, currentDensityDpi, cbStatus, cbStats
+                targetFps, udpBitrateMbps, currentDensityDpi, currentCenterRoiSize, cbStatus, cbStats
             )
         } else {
             startStreaming(
@@ -244,6 +245,7 @@ class ScreenCaptureService : Service() {
         fps: Int,
         bitrateMbps: Int,
         densityDpi: Int,
+        centerRoiSize: Int = 640,
         onStatusChanged: (Boolean, String) -> Unit,
         onStatsUpdated: (Float, Float) -> Unit
     ) {
@@ -251,13 +253,12 @@ class ScreenCaptureService : Service() {
         this.currentDensityDpi = densityDpi
         this.currentWidth = width
         this.currentHeight = height
+        this.currentCenterRoiSize = centerRoiSize
         this.statusCallback = onStatusChanged
         this.statsCallback = onStatsUpdated
         this.udpTargetIp = targetIp
         this.udpTargetPort = targetPort
         this.udpBitrateMbps = bitrateMbps
-        this.statusCallback = onStatusChanged
-        this.statsCallback = onStatsUpdated
 
         var retryCount = 0
         while (mediaProjection == null && retryCount < 10) {
@@ -280,7 +281,8 @@ class ScreenCaptureService : Service() {
             height = height,
             fps = fps,
             bitrateMbps = bitrateMbps,
-            densityDpi = densityDpi
+            densityDpi = densityDpi,
+            centerRoiSize = currentCenterRoiSize
         ).apply {
             this.onStatusChanged = { running, msg -> mainHandler.post { onStatusChanged(running, msg) } }
             this.onStatsUpdated = { f, kbps -> mainHandler.post { onStatsUpdated(f, kbps) } }

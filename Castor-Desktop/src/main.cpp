@@ -44,6 +44,12 @@ static ID3D11ShaderResourceView* g_displaySrv = nullptr;
 static int                      g_displayW = 0;
 static int                      g_displayH = 0;
 
+// 中心原画 (Picture-in-Picture) 纹理
+static ID3D11ShaderResourceView* g_roiSrv = nullptr;
+static int                      g_roiW = 0;
+static int                      g_roiH = 0;
+static uint64_t                 lastRoiSeq = 0;
+
 // 前向声明
 bool CreateDeviceD3D(HWND hWnd);
 void CleanupDeviceD3D();
@@ -109,6 +115,11 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR pCmdLine
     CastorVideo::H264UdpReceiver h264Udp;
     h264Udp.SetD3DDevice(g_pd3dDevice, g_pd3dDeviceContext); // 仅存指针；GPU 转换在渲染线程调用
     h264Udp.Start(27190);
+
+    // 私有 H.264 UDP 中心 1:1 原画通道 (手机中心裁剪 -> UDP 27192 -> PC 独立硬解)
+    CastorVideo::H264UdpReceiver h264Roi;
+    h264Roi.SetD3DDevice(g_pd3dDevice, g_pd3dDeviceContext);
+    h264Roi.Start(27192);
 
     // 初始化 Dear ImGui
     IMGUI_CHECKVERSION();
@@ -387,14 +398,35 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR pCmdLine
         streamConfig.ndiDropped = videoReceiver.DroppedVideoFrames();
         streamConfig.ndiQueue = videoReceiver.QueueVideoDepth();
 
+        // 2.1 尝试获取中心 1:1 原画帧 (UDP 27192)
+        CastorVideo::FrameBuffer newRoiFrame;
+        bool hasRoiFrame = false;
+        if (h264Roi.AcquireLatestFrame(newRoiFrame, lastRoiSeq)) {
+            lastRoiSeq = newRoiFrame.seq;
+            hasRoiFrame = true;
+        }
+        if (hasRoiFrame && newRoiFrame.nv12Frame && newRoiFrame.rgba && !newRoiFrame.rgba->empty()) {
+            if (h264Roi.EnsureGpu(newRoiFrame.width, newRoiFrame.height) &&
+                h264Roi.ConvertOnGpu(newRoiFrame.rgba->data(), newRoiFrame.width, newRoiFrame.height, newRoiFrame.nv12Stride)) {
+                g_roiSrv = h264Roi.GpuSrv();
+                g_roiW = newRoiFrame.width;
+                g_roiH = newRoiFrame.height;
+            }
+        }
+        streamConfig.hasRoiStream = (g_roiSrv != nullptr && g_roiW > 0);
+        streamConfig.roiWidth = g_roiW;
+        streamConfig.roiHeight = g_roiH;
+        if (hasRoiFrame && newRoiFrame.fps > 0.1f) streamConfig.roiFps = newRoiFrame.fps;
+        streamConfig.roiMbps = h264Roi.BitrateMbps();
+
         streamConfig.renderFps = ImGui::GetIO().Framerate;
 
-        // 渲染主界面 (传入真实视频纹理指针与分辨率)
+        // 渲染主界面 (传入真实视频背景纹理 + 中心 1:1 原画纹理)
         RECT rect;
         GetClientRect(hwnd, &rect);
         float width = static_cast<float>(rect.right - rect.left);
         float height = static_cast<float>(rect.bottom - rect.top);
-        streamingUI.Render(streamConfig, width, height, g_displaySrv, g_displayW, g_displayH);
+        streamingUI.Render(streamConfig, width, height, g_displaySrv, g_displayW, g_displayH, g_roiSrv, g_roiW, g_roiH);
 
         // 渲染输出
         auto drawT0 = std::chrono::steady_clock::now();
