@@ -250,105 +250,136 @@ bool ModelManager::ParseOnnxMetadata(const std::string& filePath, int& outW, int
     std::ifstream file(Utf8ToWString(filePath), std::ios::binary);
     if (!file.is_open()) return false;
 
-    // 读取前 1MB 二进制（ONNX metadata_props 和 graph 头部都在最前端）
-    const size_t maxScan = 1024 * 1024;
-    std::vector<char> buffer(maxScan);
-    file.read(buffer.data(), maxScan);
-    size_t readBytes = (size_t)file.gcount();
-    buffer.resize(readBytes);
+    // 获取文件大小
+    file.seekg(0, std::ios::end);
+    size_t fileSize = (size_t)file.tellg();
+    if (fileSize == 0) return false;
 
-    std::string content(buffer.begin(), buffer.end());
+    // Ultralytics YOLO 等模型导出时，protobuf 序列化后 metadata_props 往往被排在文件末尾，
+    // 也有部分转换工具将 metadata 写入文件头部。
+    // 因此对于大文件分别读取末尾 4MB 与开头 2MB
+    std::vector<std::string> chunks;
+    if (fileSize <= 8 * 1024 * 1024) {
+        file.seekg(0, std::ios::beg);
+        std::string buf(fileSize, '\0');
+        file.read(&buf[0], fileSize);
+        chunks.push_back(std::move(buf));
+    } else {
+        // 先读取末尾 4MB (权重在前面，元数据在末尾)
+        size_t tailSize = (std::min)(fileSize, (size_t)(4 * 1024 * 1024));
+        file.seekg(fileSize - tailSize, std::ios::beg);
+        std::string tailBuf(tailSize, '\0');
+        file.read(&tailBuf[0], tailSize);
+        chunks.push_back(std::move(tailBuf));
 
-    // 1. 扫描 imgsz 分辨率 (如 "[256, 256]" 或 "[640, 640]")
-    size_t imgszPos = content.find("imgsz");
-    if (imgszPos != std::string::npos) {
-        size_t bOpen = content.find('[', imgszPos);
-        size_t bClose = content.find(']', imgszPos);
-        if (bOpen != std::string::npos && bClose != std::string::npos && bClose > bOpen && (bClose - bOpen) < 40) {
-            std::string sub = content.substr(bOpen + 1, bClose - bOpen - 1);
-            int w = 0, h = 0;
-            if (sscanf_s(sub.c_str(), "%d,%d", &w, &h) == 2 && w > 0 && h > 0) {
-                outW = w;
-                outH = h;
-            } else if (sscanf_s(sub.c_str(), "%d , %d", &w, &h) == 2 && w > 0 && h > 0) {
-                outW = w;
-                outH = h;
-            }
-        }
+        // 再读取开头 2MB
+        size_t headSize = (std::min)(fileSize, (size_t)(2 * 1024 * 1024));
+        file.seekg(0, std::ios::beg);
+        std::string headBuf(headSize, '\0');
+        file.read(&headBuf[0], headSize);
+        chunks.push_back(std::move(headBuf));
     }
 
-    // 2. 扫描 names (YOLO 模型通常存放于 metadata 中的 names 键)
-    size_t namesPos = content.find("names");
+    // 1. 扫描 imgsz 分辨率 (如 "[416, 416]" 或 "[640, 640]")
+    bool foundImgsz = false;
+    for (const auto& content : chunks) {
+        size_t imgszPos = content.find("imgsz");
+        while (imgszPos != std::string::npos) {
+            size_t bOpen = content.find('[', imgszPos);
+            size_t bClose = content.find(']', imgszPos);
+            if (bOpen != std::string::npos && bClose != std::string::npos && bClose > bOpen && (bClose - bOpen) < 40) {
+                std::string sub = content.substr(bOpen + 1, bClose - bOpen - 1);
+                int w = 0, h = 0;
+                if (sscanf_s(sub.c_str(), "%d,%d", &w, &h) == 2 && w > 0 && h > 0) {
+                    outW = w;
+                    outH = h;
+                    foundImgsz = true;
+                    break;
+                } else if (sscanf_s(sub.c_str(), "%d , %d", &w, &h) == 2 && w > 0 && h > 0) {
+                    outW = w;
+                    outH = h;
+                    foundImgsz = true;
+                    break;
+                } else if (sscanf_s(sub.c_str(), "%d", &w) == 1 && w > 0) {
+                    outW = w;
+                    outH = w;
+                    foundImgsz = true;
+                    break;
+                }
+            }
+            imgszPos = content.find("imgsz", imgszPos + 5);
+        }
+        if (foundImgsz) break;
+    }
+
+
+    // 2. 扫描 names (YOLO 模型存放于 metadata 中的 names 键)
     bool foundClasses = false;
-
-    if (namesPos != std::string::npos) {
-        // 查找其后的字典 '{' 或列表 '['
-        size_t searchLimit = (std::min)(content.size(), namesPos + 8192);
-        size_t bracePos = std::string::npos;
-        for (size_t i = namesPos; i < searchLimit; ++i) {
-            if (content[i] == '{' || content[i] == '[') {
-                bracePos = i;
-                break;
-            }
-        }
-
-        if (bracePos != std::string::npos) {
-            char openChar = content[bracePos];
-            char closeChar = (openChar == '{') ? '}' : ']';
-            size_t closePos = content.find(closeChar, bracePos);
-
-            if (closePos != std::string::npos && closePos > bracePos && (closePos - bracePos) < 16384) {
-                std::string dictStr = content.substr(bracePos, closePos - bracePos + 1);
-
-                // Python 导出常见格式：{0: 'head', 1: 'body'} 或 {0: "head"}
-                // 替换单引号为双引号以兼容 JSON
-                std::string jsonStr;
-                jsonStr.reserve(dictStr.size() + 32);
-                for (size_t i = 0; i < dictStr.size(); ++i) {
-                    char c = dictStr[i];
-                    if (c == '\'') jsonStr += '\"';
-                    else jsonStr += c;
+    for (const auto& content : chunks) {
+        size_t namesPos = content.find("names");
+        while (namesPos != std::string::npos) {
+            // 向后查找紧邻的字典 '{' 或列表 '['
+            size_t searchLimit = (std::min)(content.size(), namesPos + 1024);
+            size_t bracePos = std::string::npos;
+            for (size_t i = namesPos; i < searchLimit; ++i) {
+                if (content[i] == '{' || content[i] == '[') {
+                    bracePos = i;
+                    break;
                 }
+            }
 
-                // 尝试用正则表达式提取字符串值 (更容错)
-                std::regex re(R"(['"]([^'"]+)['"])");
-                std::sregex_iterator it(dictStr.begin(), dictStr.end(), re);
-                std::sregex_iterator end;
+            if (bracePos != std::string::npos) {
+                char openChar = content[bracePos];
+                char closeChar = (openChar == '{') ? '}' : ']';
+                size_t closePos = content.find(closeChar, bracePos);
 
-                std::map<int, std::string> idToName;
-                std::vector<std::string> rawList;
+                if (closePos != std::string::npos && closePos > bracePos && (closePos - bracePos) < 65536) {
+                    std::string dictStr = content.substr(bracePos, closePos - bracePos + 1);
 
-                // 尝试正则匹配 key: 'val'
-                std::regex pairRe(R"((\d+)\s*:\s*['"]([^'"]+)['"])");
-                std::sregex_iterator pit(dictStr.begin(), dictStr.end(), pairRe);
+                    // 字典格式：{0: 'body', 1: 'head'} 或 {"0": "body"}
+                    std::map<int, std::string> idToName;
+                    std::regex pairRe(R"((\d+)\s*:\s*['"]([^'"]+)['"])");
+                    std::sregex_iterator pit(dictStr.begin(), dictStr.end(), pairRe);
+                    std::sregex_iterator end;
 
-                if (pit != end) {
-                    while (pit != end) {
-                        int id = std::stoi((*pit)[1].str());
-                        std::string name = (*pit)[2].str();
-                        idToName[id] = name;
-                        ++pit;
-                    }
-                    for (const auto& kv : idToName) {
-                        outClasses.push_back(kv.second);
-                    }
-                    if (!outClasses.empty()) foundClasses = true;
-                } else {
-                    // 若是列表 ['cls1', 'cls2']
-                    while (it != end) {
-                        std::string val = (*it)[1].str();
-                        if (val != "names") {
-                            rawList.push_back(val);
+                    if (pit != end) {
+                        while (pit != end) {
+                            int id = std::stoi((*pit)[1].str());
+                            std::string name = (*pit)[2].str();
+                            idToName[id] = name;
+                            ++pit;
                         }
-                        ++it;
-                    }
-                    if (!rawList.empty()) {
-                        outClasses = rawList;
-                        foundClasses = true;
+                        if (!idToName.empty()) {
+                            outClasses.clear();
+                            for (const auto& kv : idToName) {
+                                outClasses.push_back(kv.second);
+                            }
+                            foundClasses = true;
+                            break;
+                        }
+                    } else {
+                        // 列表格式：['cls1', 'cls2']
+                        std::regex itemRe(R"(['"]([^'"]+)['"])");
+                        std::sregex_iterator it(dictStr.begin(), dictStr.end(), itemRe);
+                        std::vector<std::string> rawList;
+                        while (it != end) {
+                            std::string val = (*it)[1].str();
+                            if (val != "names") {
+                                rawList.push_back(val);
+                            }
+                            ++it;
+                        }
+                        if (!rawList.empty()) {
+                            outClasses = rawList;
+                            foundClasses = true;
+                            break;
+                        }
                     }
                 }
             }
+            namesPos = content.find("names", namesPos + 5);
         }
+        if (foundClasses) break;
     }
 
     return foundClasses;
