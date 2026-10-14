@@ -18,6 +18,7 @@
 #include "mirror_types.h"
 #include "h264_udp_receiver.h"
 #include "perf_logger.h"
+#include "model_manager.h"
 
 #include <cstdio>
 #include <chrono>
@@ -143,6 +144,9 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR pCmdLine
     streamConfig.beaconPort = 19889;
 
     CastorUI::StreamingUI streamingUI;
+
+    // 初始化 AI 模型管理系统 (.castor 目录及 models.json / config.json)
+    CastorAI::ModelManager::Instance().Initialize();
 
     // 清屏颜色 (深度深空灰背景)
     const float clearColor[4] = { 0.07f, 0.09f, 0.12f, 1.00f };

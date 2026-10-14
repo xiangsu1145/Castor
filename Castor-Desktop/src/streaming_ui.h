@@ -93,6 +93,8 @@ private:
     void RenderMainView(StreamConfig& config, void* videoTextureSrv, int videoW, int videoH,
                         void* roiTextureSrv = nullptr, int roiW = 0, int roiH = 0);
     void RenderHudOverlay(const StreamConfig& config);
+    void RenderModelManagementSection();
+    void RenderImportModelModal();
 };
 
 } // namespace CastorUI

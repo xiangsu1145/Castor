@@ -45,6 +45,8 @@ set(APP_SOURCES
     "src/h264_decoder.cpp"
     "src/h264_udp_receiver.h"
     "src/h264_udp_receiver.cpp"
+    "src/model_manager.h"
+    "src/model_manager.cpp"
 )
 
 add_executable(CastorDesktop WIN32
@@ -54,6 +56,7 @@ add_executable(CastorDesktop WIN32
 
 target_include_directories(CastorDesktop PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    "${CMAKE_CURRENT_SOURCE_DIR}/third_party"
     "${IMGUI_DIR}"
     "${IMGUI_DIR}/backends"
     "${CMAKE_CURRENT_SOURCE_DIR}/third_party/turbojpeg/include"

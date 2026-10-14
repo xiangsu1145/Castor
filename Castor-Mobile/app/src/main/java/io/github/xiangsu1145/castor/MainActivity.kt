@@ -456,8 +456,8 @@ class MainActivity : AppCompatActivity() {
                 layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1.0f)
                 setOnClickListener {
                     val (w, h) = getScreenMetrics()
-                    targetWidth = ((w / 16) * 16)
-                    targetHeight = ((h / 16) * 16)
+                    targetWidth = ((w + 1) / 2) * 2
+                    targetHeight = ((h + 1) / 2) * 2
                     resTitle.text = "分辨率: 原生原画 ($targetWidth x $targetHeight)"
                     captureService?.updateResolution(targetWidth, targetHeight, resources.displayMetrics.densityDpi)
                 }

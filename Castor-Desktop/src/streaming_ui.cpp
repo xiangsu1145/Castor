@@ -1,4 +1,5 @@
 #include "streaming_ui.h"
+#include "model_manager.h"
 #include <imgui.h>
 #include <cmath>
 #include <algorithm>
@@ -47,6 +48,9 @@ void StreamingUI::Render(StreamConfig& config, float screenWidth, float screenHe
         RenderHudOverlay(config);
     }
     ImGui::EndChild();
+
+    // 渲染导入 ONNX 模型弹窗 (若触发)
+    RenderImportModelModal();
 
     ImGui::End();
 }
@@ -186,6 +190,11 @@ void StreamingUI::RenderSidebar(StreamConfig& config) {
     }
 
     ImGui::Spacing();
+
+    // 卡片 4: AI 模型管理与参数配置
+    RenderModelManagementSection();
+
+    ImGui::Spacing();
     ImGui::Separator();
     ImGui::TextDisabled("Castor 无线投屏工具");
 }
@@ -310,6 +319,185 @@ void StreamingUI::RenderHudOverlay(const StreamConfig& config) {
     }
     ImGui::Text("渲染: %.2f ms", config.renderMs);
     ImGui::End();
+}
+
+void StreamingUI::RenderModelManagementSection() {
+    if (ImGui::CollapsingHeader("AI 模型管理 (ONNX)", ImGuiTreeNodeFlags_DefaultOpen)) {
+        ImGui::Spacing();
+        auto& mgr = CastorAI::ModelManager::Instance();
+        auto& models = mgr.GetModels();
+        auto* activeModel = mgr.GetActiveModel();
+
+        // 导入模型按钮
+        if (ImGui::Button("+ 导入 ONNX 模型", ImVec2(-1, 30))) {
+            mgr.TriggerImportFlow();
+        }
+
+        ImGui::Spacing();
+        ImGui::Text("选择当前生效模型:");
+
+        // 模型选择下拉框 (Combo)
+        std::string currentModelLabel = activeModel ? (activeModel->name + " (" + std::to_string(activeModel->width) + "x" + std::to_string(activeModel->height) + ")") : "暂无可用模型 (请先导入)";
+        if (ImGui::BeginCombo("##ModelSelectCombo", currentModelLabel.c_str())) {
+            for (const auto& m : models) {
+                bool isSelected = (activeModel && activeModel->id == m.id);
+                std::string label = m.name + " (" + std::to_string(m.width) + "x" + std::to_string(m.height) + ")";
+                if (ImGui::Selectable(label.c_str(), isSelected)) {
+                    mgr.SetActiveModelId(m.id);
+                }
+                if (isSelected) {
+                    ImGui::SetItemDefaultFocus();
+                }
+            }
+            ImGui::EndCombo();
+        }
+
+        if (activeModel) {
+            ImGui::Spacing();
+            ImGui::Separator();
+            ImGui::Spacing();
+
+            ImGui::Text("模型名称: %s", activeModel->name.c_str());
+            ImGui::Text("输入分辨率: %d x %d", activeModel->width, activeModel->height);
+            ImGui::TextDisabled("缓存路径: %s", activeModel->relativePath.c_str());
+
+            ImGui::Spacing();
+            // 全局总 NMS (默认 0.45)
+            if (ImGui::SliderFloat("总 NMS 阈值", &activeModel->globalNms, 0.10f, 0.95f, "%.2f")) {
+                mgr.SaveModels();
+            }
+
+            ImGui::Spacing();
+            ImGui::Separator();
+            ImGui::Spacing();
+
+            ImGui::Text("类别专属阈值配置 (%zu 个类别):", activeModel->classes.size());
+
+            if (!activeModel->classes.empty()) {
+                static int s_selectedClassIdx = 0;
+                if (s_selectedClassIdx >= (int)activeModel->classes.size()) {
+                    s_selectedClassIdx = 0;
+                }
+
+                // 类别下拉选择框 (Combo)
+                std::string curClassLabel = "[" + std::to_string(activeModel->classes[s_selectedClassIdx].id) + "] " + activeModel->classes[s_selectedClassIdx].name;
+                if (ImGui::BeginCombo("##ClassSelectCombo", curClassLabel.c_str())) {
+                    for (int i = 0; i < (int)activeModel->classes.size(); ++i) {
+                        bool isSel = (s_selectedClassIdx == i);
+                        std::string clsItemLabel = "[" + std::to_string(activeModel->classes[i].id) + "] " + activeModel->classes[i].name;
+                        if (ImGui::Selectable(clsItemLabel.c_str(), isSel)) {
+                            s_selectedClassIdx = i;
+                        }
+                        if (isSel) {
+                            ImGui::SetItemDefaultFocus();
+                        }
+                    }
+                    ImGui::EndCombo();
+                }
+
+                auto& curClass = activeModel->classes[s_selectedClassIdx];
+                ImGui::Spacing();
+                // 类别专属置信度与 IOU 设置 (默认 0.50)
+                if (ImGui::SliderFloat("类别置信度 (Conf)", &curClass.conf, 0.05f, 0.95f, "%.2f")) {
+                    mgr.SaveModels();
+                }
+                if (ImGui::SliderFloat("类别交并比 (IOU)", &curClass.iou, 0.05f, 0.95f, "%.2f")) {
+                    mgr.SaveModels();
+                }
+
+                ImGui::Spacing();
+                if (ImGui::Button("同步此参数到全部类别", ImVec2(-1, 24))) {
+                    for (auto& c : activeModel->classes) {
+                        c.conf = curClass.conf;
+                        c.iou = curClass.iou;
+                    }
+                    mgr.SaveModels();
+                }
+            } else {
+                ImGui::TextDisabled("该模型暂无类别信息");
+            }
+
+            ImGui::Spacing();
+            ImGui::Separator();
+            ImGui::Spacing();
+
+            if (ImGui::Button("删除此模型", ImVec2(-1, 24))) {
+                mgr.DeleteModel(activeModel->id);
+            }
+        } else {
+            ImGui::Spacing();
+            ImGui::TextDisabled("提示: 暂无导入的模型。点击上方【+ 导入 ONNX 模型】即可选择 .onnx 文件导入。");
+        }
+        ImGui::Spacing();
+    }
+}
+
+void StreamingUI::RenderImportModelModal() {
+    auto& mgr = CastorAI::ModelManager::Instance();
+    auto& pending = mgr.GetPendingImport();
+
+    if (pending.isOpen) {
+        ImGui::OpenPopup("导入 ONNX 模型确认##Modal");
+    }
+
+    ImVec2 center = ImGui::GetMainViewport()->GetCenter();
+    ImGui::SetNextWindowPos(center, ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+    ImGui::SetNextWindowSize(ImVec2(480, 0), ImGuiCond_Appearing);
+
+    if (ImGui::BeginPopupModal("导入 ONNX 模型确认##Modal", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+        ImGui::Text("正在导入模型:");
+        ImGui::TextColored(ImVec4(0.0f, 0.86f, 0.88f, 1.0f), "%s", pending.originalFilePath.c_str());
+        ImGui::Separator();
+        ImGui::Spacing();
+
+        ImGui::Text("模型名称 (必填):");
+        ImGui::InputText("##ModelNameInput", pending.modelNameInput, sizeof(pending.modelNameInput));
+
+        ImGui::Spacing();
+        ImGui::Text("输入分辨率: %d x %d (已自动解析)", pending.detectedWidth, pending.detectedHeight);
+
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::Spacing();
+
+        if (pending.hasMetadata && !pending.detectedClasses.empty()) {
+            ImGui::TextColored(ImVec4(0.2f, 1.0f, 0.4f, 1.0f), "● 成功从 ONNX 元数据解析到 %zu 个类别:", pending.detectedClasses.size());
+            ImGui::BeginChild("DetectedClassesPreview", ImVec2(0, 110), true);
+            for (size_t i = 0; i < pending.detectedClasses.size(); ++i) {
+                ImGui::Text("[%zu] %s", i, pending.detectedClasses[i].c_str());
+            }
+            ImGui::EndChild();
+        } else {
+            ImGui::TextColored(ImVec4(1.0f, 0.7f, 0.2f, 1.0f), "● 未在 ONNX 元数据中检测到类别信息");
+            ImGui::TextWrapped("请在下方手动输入类别名称（每行一个类别，如 body、head）：");
+            ImGui::InputTextMultiline("##ManualClasses", pending.manualClassesText, sizeof(pending.manualClassesText), ImVec2(-1, 100));
+        }
+
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::Spacing();
+
+        bool canConfirm = (pending.modelNameInput[0] != '\0');
+        if (!canConfirm) {
+            ImGui::BeginDisabled();
+        }
+        if (ImGui::Button("确认导入", ImVec2(120, 32))) {
+            mgr.FinalizeImport(pending);
+            pending.isOpen = false;
+            ImGui::CloseCurrentPopup();
+        }
+        if (!canConfirm) {
+            ImGui::EndDisabled();
+        }
+
+        ImGui::SameLine();
+        if (ImGui::Button("取消", ImVec2(120, 32))) {
+            pending.isOpen = false;
+            ImGui::CloseCurrentPopup();
+        }
+
+        ImGui::EndPopup();
+    }
 }
 
 } // namespace CastorUI

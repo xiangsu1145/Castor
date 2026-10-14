@@ -210,9 +210,9 @@ class H264UdpStreamer(
     }
 
     private fun setupCodecAndVirtualDisplay() {
-        // 宽高按 16 字节对齐
-        val alignedW = ((width + 15) / 16) * 16
-        val alignedH = ((height + 15) / 16) * 16
+        // 宽高按偶数对齐 (保持 3000x2120 等真实物理分辨率原生点对点，不产生黑边)
+        val alignedW = ((width + 1) / 2) * 2
+        val alignedH = ((height + 1) / 2) * 2
 
         Log.i(TAG, "正在创建背景 MediaCodec 硬件编码器: ${alignedW}x${alignedH} @ ${bitrateMbps}Mbps CBR, ${fps}FPS")
         mediaCodec = createEncoder(alignedW, alignedH, bitrateMbps * 1000 * 1000)
